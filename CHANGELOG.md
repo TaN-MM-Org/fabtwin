@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.2.0 (2026-09-10)
+
+Real-data release: the pipeline the paper names as the essential next
+step -- a twin trained and scored on a lab's own traces -- is now a
+documented, validated pathway.
+
+### Added
+
+- `fabtwin.data`: `load_traces_csv` / `save_traces_csv` on a
+  documented tidy trace-file contract (run, layer, t_recipe_um,
+  n_recipe, t_fab_um, n_fab) with an exact round trip; malformed
+  files (wrong header, layer gaps, duplicates, ragged runs) are
+  refused, not guessed at. `validate_traces` raises on structural
+  problems (non-finite, non-positive, shape mismatch) and reports
+  plausibility flags (screening defaults documented as such) instead
+  of silently dropping outliers.
+- `fabtwin.fidelity`: held-out twin scoring for data with no oracle.
+  `moment_errors` (pooled mean/covariance/correlation discrepancies),
+  `distribution_distances` (|d mean|, |d P|, |d CVaR| in the risk
+  module's exact conventions, plus 1-D Wasserstein), `induced_merits`
+  (error vectors -> merit samples through the exact solver) and
+  `twin_fidelity_report` (the paper's Table I(A) statistic types,
+  averaged over a calibration design bank). Anchors: every distance
+  exactly zero against self; W1 equal to SciPy's independent
+  implementation; tail statistics identical to `fabtwin.risk`; a
+  deliberately mean-shifted twin scores strictly worse than a fitted
+  one on held-out data.
+- End-to-end bring-your-own-data test: CSV in, validate, split, fit,
+  held-out fidelity report, CVaR robustification.
+- README: "Bring your own fabrication data" section with the data
+  contract and the honest scope statement (held-out fidelity
+  certifies recorded behavior only; the paper's yield gains are
+  within its virtual setting; production twins need periodic
+  retraining as the tool drifts).
+
+
 ## 0.1.1 (2026-09-10)
 
 Adaptation release: the differentiable loop now covers classic

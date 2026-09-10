@@ -114,9 +114,47 @@ The learned twin drops in through the `[twin]` extra:
 `fabtwin.twin_jax.train_wgan` on the same traces, then
 `robustify_gan` ascends the identical objective through the generator.
 
+## Bring your own fabrication data
+
+The twins never see a simulator -- they consume (recipe, outcome)
+traces, which is exactly what a monitored deposition tool logs. The
+paper is a fully simulation-based study and names a twin trained on
+real in-situ monitoring data as the essential next step; this package
+is that interface. `load_traces_csv` / `save_traces_csv` implement a
+documented tidy trace-file contract (one row per run and layer:
+`run, layer, t_recipe_um, n_recipe, t_fab_um, n_fab`) with exact
+round trip; `validate_traces` raises on structural problems and
+*reports* plausibility findings (probable unit mix-ups) rather than
+silently dropping a lab's outliers -- the heavy tail is precisely
+what the twin is for.
+
+Because real data has no hidden oracle to draw fresh truth from,
+`twin_fidelity_report` scores a twin the honest way: a held-out trace
+split, compared on the paper's Table I(A) statistic types -- pooled
+moment/correlation errors plus |dP5|, |dCVaR|, W1 of the merit
+distribution the errors induce on a calibration design bank, through
+the exact solver.
+
+```python
+rt, rn, ftd, fnd = ft.load_traces_csv("fab_traces.csv")   # your tool's log
+ft.validate_traces(rt, rn, ftd, fnd)
+x = ft.errors_from_traces(rt, rn, ftd, fnd)
+twin = ft.GaussianTwin(x[::2])                             # fit on half
+rep = ft.twin_fidelity_report(                             # score on the rest
+    twin.sample_errors(np.random.default_rng(0), 400), x[1::2],
+    [(rt[0], rn[0])], lam, S, w, c0, n_sub=nsub)
+```
+
+Honest scope: a held-out split certifies the twin against your fab's
+*recorded* behavior; it cannot certify error patterns the tool has
+never logged, the paper's yield-gain numbers are established within
+its virtual setting, and in production the twin needs periodic
+retraining on fresh traces as the tool drifts (the paper's own
+Applicability caveat).
+
 ## Status
 
-v0.1.1 (alpha). Implemented and tested (44 tests, Python 3.10-3.13;
+v0.2.0 (alpha). Implemented and tested (52 tests, Python 3.10-3.13;
 the JAX extra's tests skip cleanly without it): everything listed
 above, with every physics claim anchored to a closed form, an
 independent reference implementation, or an exact identity -- never to
