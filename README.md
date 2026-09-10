@@ -1,7 +1,7 @@
 # fabtwin
 
 [![tests](https://github.com/TaN-MM-Org/fabtwin/actions/workflows/ci.yml/badge.svg)](https://github.com/TaN-MM-Org/fabtwin/actions)
-[![PyPI](https://img.shields.io/pypi/v/fabtwin)](https://pypi.org/project/fabtwin/)
+[![PyPI](https://img.shields.io/pypi/v/fabtwin?cacheSeconds=3600)](https://pypi.org/project/fabtwin/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Learned generative process twins for yield-aware inverse design of
