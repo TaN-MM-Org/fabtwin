@@ -42,7 +42,10 @@ physics agreeing is the package's core cross-validation.
   analytic Brewster zero, and R + T = 1 at machine precision.
 - `fabtwin.adjoint` -- the hand-derived exact adjoint: `merit_and_grad`
   returns dJ/d(thickness) and dJ/d(index) from two O(NL) sweeps of
-  prefix/suffix products. Matches central finite differences at the
+  prefix/suffix products, with the dispersion `shape` either shared
+  (the paper's variable-index single-material platform) or per-layer
+  (N, L) -- so classic multi-material stacks use the same
+  differentiable loop. Matches central finite differences at the
   paper's own accuracy figure and vanishes exactly at the closed-form
   quarter-wave optimum.
 - `fabtwin.materials` -- a cited Sellmeier engine (Si3N4: Luke 2015;
@@ -113,11 +116,16 @@ The learned twin drops in through the `[twin]` extra:
 
 ## Status
 
-v0.1.0 (alpha). Implemented and tested (37 tests, Python 3.10-3.13;
+v0.1.1 (alpha). Implemented and tested (44 tests, Python 3.10-3.13;
 the JAX extra's tests skip cleanly without it): everything listed
 above, with every physics claim anchored to a closed form, an
 independent reference implementation, or an exact identity -- never to
-a stored number. The API may change before v1.0.
+a stored number. The adaptation testbench runs the complete loop on a
+platform the paper never touched (a two-material Si3N4/SiO2 mirror
+with per-layer dispersion, held to the textbook quarter-wave-stack
+closed form) and exercises user-registered materials end to end, so
+"generalizes" is a test result, not a claim. The API may change
+before v1.0.
 
 Deliberate scope, designed out with reasons rather than overlooked:
 

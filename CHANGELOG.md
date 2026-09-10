@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.1 (2026-09-10)
+
+Adaptation release: the differentiable loop now covers classic
+multi-material stacks, and generalization is a test result.
+
+### Added
+
+- Per-layer dispersion: the `shape` argument of the adjoint, the JAX
+  solver, the design engine and the scoring helpers now accepts a
+  per-layer (N, L) array as well as the shared (L,) shape, so
+  two-material (and any-material) stacks run through the identical
+  differentiable loop; mismatched shapes are refused.
+- Adaptation testbench (7 new anchors): the (HL)^p quarter-wave
+  mirror against the independent textbook closed form
+  R = ((1 - Y)/(1 + Y))^2 with Y = (nH/nL)^(2p) n_sub, to 1e-12 for
+  p = 1, 3, 6; per-layer adjoint vs central finite differences on a
+  dispersive Si3N4/SiO2 stack; bitwise reduction of per-layer to
+  shared shapes; JAX/NumPy per-layer solver agreement to 1e-12;
+  user-registered `SellmeierMaterial` end to end (range refusal,
+  shape identity, adjoint-vs-FD); and the complete
+  design -> traces -> twin -> CVaR robustification -> scoring loop on
+  the adapted platform.
+
+
 ## 0.1.0 (2026-09-10)
 
 Initial release: the generalized library form of the FabGAN-ID
