@@ -26,8 +26,11 @@ from .risk import (cvar, evaluate_under_process, pass_fail,
                    tail_statistics, yield_fraction)
 from .design import DesignBox, adam_ascent, inverse_design, random_search
 from .robust import cvar_objective_and_grad, robustify
+from .data import load_traces_csv, save_traces_csv, validate_traces
+from .fidelity import (distribution_distances, induced_merits,
+                       moment_errors, twin_fidelity_report)
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 __all__ = [
     "SellmeierMaterial", "SI3N4_LUKE2015", "SIO2_MALITSON1965",
     "sellmeier", "dispersion_shape", "layer_index",
@@ -40,4 +43,7 @@ __all__ = [
     "evaluate_under_process",
     "DesignBox", "inverse_design", "random_search", "adam_ascent",
     "cvar_objective_and_grad", "robustify",
+    "load_traces_csv", "save_traces_csv", "validate_traces",
+    "moment_errors", "distribution_distances", "induced_merits",
+    "twin_fidelity_report",
 ]
