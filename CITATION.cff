@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it together with the associated paper."
+title: "fabtwin: learned generative process twins for yield-aware inverse design of multilayer optics"
+type: software
+authors:
+  - family-names: "Mahim"
+    given-names: "Tanvir Mahmud"
+    affiliation: "BRAC University"
+version: 0.1.0
+date-released: 2026-09-10
+license: Apache-2.0
+repository-code: "https://github.com/TaN-MM-Org/fabtwin"
+preferred-citation:
+  type: article
+  title: "FabGAN-ID: Learning the Fabrication Process for Yield-Aware Inverse Design of Multilayer Photonic Sensor Filters"
+  authors:
+    - family-names: "Mahim"
+      given-names: "Tanvir M."
+    - family-names: "Islam"
+      given-names: "Md Nahin"
+    - family-names: "Rahman"
+      given-names: "M. Mosaddequr"
+    - family-names: "Mohsin"
+      given-names: "Abu S. M."
+  journal: "IEEE Sensors Journal"
+  year: 2026

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fabtwin"
+version = "0.1.0"
+description = "Learned generative process twins for yield-aware inverse design of multilayer optics: exact TMM with a hand-derived adjoint, CVaR robustification through twin and physics at once"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Tanvir Mahmud Mahim"}]
+dependencies = ["numpy>=1.26", "scipy>=1.11"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/TaN-MM-Org/fabtwin"
+Paper = "https://github.com/Tanvir-Mahmud-Mahim/Learned-generative-process-twins-for-yield-aware-inverse-design-of-multilayer-photonic-sensor"
+
+[project.optional-dependencies]
+twin = ["jax>=0.4.30", "optax>=0.2"]
+test = ["pytest>=7", "tmm>=0.1.8"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
