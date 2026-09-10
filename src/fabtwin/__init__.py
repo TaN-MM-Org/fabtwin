@@ -27,7 +27,7 @@ from .risk import (cvar, evaluate_under_process, pass_fail,
 from .design import DesignBox, adam_ascent, inverse_design, random_search
 from .robust import cvar_objective_and_grad, robustify
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "SellmeierMaterial", "SI3N4_LUKE2015", "SIO2_MALITSON1965",
     "sellmeier", "dispersion_shape", "layer_index",

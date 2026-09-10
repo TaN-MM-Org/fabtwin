@@ -16,9 +16,11 @@ r_i = M_{i+1}..M_N v accumulated in two O(N L) sweeps, and
     dM/d(delta) = [[-sin d, i cos d / eta], [i eta cos d, -sin d]],
     dM/d(eta)   = [[0, -i sin d / eta^2], [i sin d, 0]].
 
-Layer i has n_i(lam) = n0_i S(lam) (real, dispersive through the
-shared shape S) and phase delta_i = 2 pi n_i t_i / lam, so the chain
-to the design parameters (t_i, n0_i) is elementary. Scope, stated
+Layer i has n_i(lam) = n0_i S_i(lam) (real; `shape` is one shared
+(L,) dispersion shape or a per-layer (N, L) array, so single-material
+variable-index platforms and classic multi-material stacks use the
+same adjoint) and phase delta_i = 2 pi n_i t_i / lam, so the chain to
+the design parameters (t_i, n0_i) is elementary. Scope, stated
 plainly: normal incidence and real (lossless) layer indices -- the
 regime of the FabGAN-ID loop; the oblique and absorbing *forward*
 solver lives in `fabtwin.tmm`, and its gradients are deliberately not
@@ -46,9 +48,14 @@ def _layer_data(lam_um, t_um, n0, shape, n_sub):
     t = np.asarray(t_um, dtype=float)
     n0 = np.asarray(n0, dtype=float)
     S = np.asarray(shape, dtype=float)
-    if S.shape != lam.shape:
-        raise ValueError("shape must be S(lam) on the wavelength grid")
-    n = n0[:, None] * S[None, :]                # (N, L) real
+    if S.ndim == 1:
+        if S.shape != lam.shape:
+            raise ValueError("shape must be S(lam) on the wavelength "
+                             "grid, or (N, L) for per-layer dispersion")
+        S = np.broadcast_to(S[None, :], (t.size, lam.size))
+    elif S.shape != (t.size, lam.size):
+        raise ValueError("per-layer shape must be (N, L)")
+    n = n0[:, None] * S                          # (N, L) real
     delta = 2.0 * np.pi * n * t[:, None] / lam[None, :]
     eta = n
     eta_sub = np.asarray(n_sub, dtype=float)
@@ -102,8 +109,8 @@ def transmittance_and_grads(lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0):
 
     two_pi_over_lam = 2.0 * np.pi / lam[None, :]
     dT_dt = dT_ddelta * n * two_pi_over_lam
-    dT_dn0 = (dT_ddelta * t[:, None] * S[None, :] * two_pi_over_lam
-              + dT_deta * S[None, :])
+    dT_dn0 = (dT_ddelta * t[:, None] * S * two_pi_over_lam
+              + dT_deta * S)
     return T, dT_dt, dT_dn0
 
 

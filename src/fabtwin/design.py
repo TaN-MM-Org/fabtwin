@@ -51,7 +51,9 @@ class DesignBox:
 
 
 def _merit_of(lam, t, n0, S, w, const, n_inc, n_sub):
-    nlay = np.asarray(n0)[:, None] * np.asarray(S)[None, :]
+    S = np.asarray(S)
+    n0 = np.asarray(n0)
+    nlay = n0[:, None] * (S[None, :] if S.ndim == 1 else S)
     T = tmm.transmittance(lam, t, nlay, n_inc, n_sub)
     return float(tmm.merit(T, w, const))
 

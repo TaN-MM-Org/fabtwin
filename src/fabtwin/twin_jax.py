@@ -60,7 +60,9 @@ def transmittance_jax(lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0):
     _require_jax()
     lam = jnp.asarray(lam_um)
     S = jnp.asarray(shape)
-    n = n0[:, None] * S[None, :]
+    if S.ndim == 1:
+        S = jnp.broadcast_to(S[None, :], (t_um.shape[0], lam.shape[0]))
+    n = n0[:, None] * S
     delta = 2.0 * jnp.pi * n * t_um[:, None] / lam[None, :]
     c = jnp.cos(delta)
     s = jnp.sin(delta)

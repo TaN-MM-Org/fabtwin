@@ -68,9 +68,11 @@ def evaluate_under_process(sampler, t_um, n0, lam_um, shape, weights,
     the merit plus the merit samples."""
     tt, nt = sampler(t_um, n0, K)
     S = np.asarray(shape, dtype=float)
+    if S.ndim == 1:
+        S = np.broadcast_to(S[None, :], (len(t_um), S.size))
     J = np.empty(K)
     for k in range(K):
-        nlay = np.asarray(nt[k])[:, None] * S[None, :]
+        nlay = np.asarray(nt[k])[:, None] * S
         T = tmm.transmittance(lam_um, tt[k], nlay, n_inc, n_sub)
         J[k] = tmm.merit(T, weights, const)
     out = tail_statistics(J, alpha)
