@@ -10,6 +10,10 @@ version: 0.2.0
 date-released: 2026-09-10
 license: Apache-2.0
 repository-code: "https://github.com/TaN-MM-Org/fabtwin"
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.22697049
+    description: "Concept DOI for all versions; resolves to the latest release"
 preferred-citation:
   type: article
   title: "FabGAN-ID: Learning the Fabrication Process for Yield-Aware Inverse Design of Multilayer Photonic Sensor Filters"

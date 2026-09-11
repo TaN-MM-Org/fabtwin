@@ -2,6 +2,7 @@
 
 [![tests](https://github.com/TaN-MM-Org/fabtwin/actions/workflows/ci.yml/badge.svg)](https://github.com/TaN-MM-Org/fabtwin/actions)
 [![PyPI](https://img.shields.io/pypi/v/fabtwin?cacheSeconds=3600)](https://pypi.org/project/fabtwin/)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22697049-blue)](https://doi.org/10.5281/zenodo.22697049)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Learned generative process twins for yield-aware inverse design of
@@ -207,4 +208,6 @@ test, and a constant arrives with its source.
 ## License and citation
 
 Apache-2.0. Cite via [CITATION.cff](CITATION.cff) and the associated
-paper above.
+paper above. Every release is archived on Zenodo under the concept DOI
+[10.5281/zenodo.22697049](https://doi.org/10.5281/zenodo.22697049),
+which always resolves to the latest version.
