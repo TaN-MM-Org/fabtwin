@@ -24,10 +24,21 @@ from . import adjoint, tmm
 __all__ = ["DesignBox", "inverse_design", "random_search", "adam_ascent"]
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, eq=False)
 class DesignBox:
     """The fabrication box: N layers with t in [t_lo, t_hi] um and
-    n(lam0) in [n_lo, n_hi]."""
+    n(lam0) in [n_lo, n_hi].
+
+    Each bound is a scalar (one window for every layer, the original
+    behavior) or an (N,) array (per-layer windows, new in v0.3). A
+    bound pair with lo == hi FREEZES that parameter: the optimizers
+    project onto the box every step, so a frozen parameter never
+    moves -- which is how a real multi-material stack, whose indices
+    are deposited materials rather than design variables, enters the
+    same loop. `DesignBox.thickness_only` builds that common case.
+    Inverted bounds, non-positive thicknesses and a fully frozen box
+    (nothing left to design) are refused.
+    """
 
     n_layers: int
     t_lo: float
@@ -36,17 +47,50 @@ class DesignBox:
     n_hi: float
 
     def __post_init__(self):
-        if self.n_layers < 1 or self.t_lo <= 0 or self.t_hi <= self.t_lo \
-                or self.n_hi <= self.n_lo:
+        if int(self.n_layers) < 1:
             raise ValueError("degenerate design box")
+        vals = {}
+        for name in ("t_lo", "t_hi", "n_lo", "n_hi"):
+            v = np.asarray(getattr(self, name), dtype=float)
+            if v.ndim not in (0, 1) or (v.ndim == 1
+                                        and v.shape != (self.n_layers,)):
+                raise ValueError(f"{name} must be a scalar or an "
+                                 f"({self.n_layers},) array")
+            if not np.all(np.isfinite(v)):
+                raise ValueError(f"{name} must be finite")
+            if v.ndim == 1:
+                object.__setattr__(self, name, v.copy())
+            else:
+                object.__setattr__(self, name, float(v))
+            vals[name] = v
+        if np.any(vals["t_lo"] <= 0.0) \
+                or np.any(vals["t_hi"] < vals["t_lo"]) \
+                or np.any(vals["n_hi"] < vals["n_lo"]):
+            raise ValueError("degenerate design box")
+        if np.all(vals["t_hi"] == vals["t_lo"]) \
+                and np.all(vals["n_hi"] == vals["n_lo"]):
+            raise ValueError("fully frozen design box: nothing left "
+                             "to design")
+
+    @classmethod
+    def thickness_only(cls, n_layers, t_lo, t_hi, n_fixed):
+        """The multi-material case: thicknesses free in [t_lo, t_hi],
+        indices frozen at n_fixed (scalar or (N,), e.g. the
+        alternating nH/nL profile of a two-material mirror)."""
+        n_fixed = np.asarray(n_fixed, dtype=float)
+        return cls(n_layers, t_lo, t_hi, n_fixed, n_fixed)
 
     def clip(self, t, n):
         return (np.clip(t, self.t_lo, self.t_hi),
                 np.clip(n, self.n_lo, self.n_hi))
 
     def sample(self, rng, R):
-        t = rng.uniform(self.t_lo, self.t_hi, (R, self.n_layers))
-        n = rng.uniform(self.n_lo, self.n_hi, (R, self.n_layers))
+        t = rng.uniform(np.broadcast_to(self.t_lo, (self.n_layers,)),
+                        np.broadcast_to(self.t_hi, (self.n_layers,)),
+                        (R, self.n_layers))
+        n = rng.uniform(np.broadcast_to(self.n_lo, (self.n_layers,)),
+                        np.broadcast_to(self.n_hi, (self.n_layers,)),
+                        (R, self.n_layers))
         return t, n
 
 

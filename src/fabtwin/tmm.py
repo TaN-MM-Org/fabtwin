@@ -36,7 +36,8 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = ["stack_BC", "stack_rt", "transmittance", "reflectance",
-           "notch_weights", "bandpass_weights", "merit"]
+           "notch_weights", "bandpass_weights", "merit",
+           "weights_from_reflectance"]
 
 
 def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
@@ -162,6 +163,28 @@ def bandpass_weights(lam_um, lo_um, hi_um, guard_um):
         raise ValueError("band layout leaves an empty band on this grid")
     w = 0.5 * inside / inside.sum() - 0.5 * outside / outside.sum()
     return w, 0.5
+
+
+def weights_from_reflectance(weights_R, const=0.0):
+    """Convert a reflectance-based linear merit into transmittance
+    weights, so mirror and high-reflector merits run through the same
+    exact adjoint (new in v0.3).
+
+    For a LOSSLESS stack R = 1 - T exactly (asserted to machine
+    precision in the solver tests), so
+
+        J = w_R . R + c = (-w_R) . T + (c + sum w_R)
+
+    is an identity, and the returned pair (w_T, const_T) feeds
+    `merit`, `merit_and_grad`, `inverse_design` and `robustify`
+    unchanged. For an ABSORBING stack R = 1 - T - A and the identity
+    fails by exactly w_R . A -- which is why the lossless hand-adjoint
+    regime is the scope here, matching `fabtwin.adjoint`.
+    """
+    w = np.asarray(weights_R, dtype=float)
+    if w.ndim != 1:
+        raise ValueError("weights_R must be a 1-D weight vector")
+    return -w, float(const) + float(w.sum())
 
 
 def merit(T, weights, const):

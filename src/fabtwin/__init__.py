@@ -15,10 +15,10 @@ principle of the paper is the guiding principle of the package:
 learn what cannot be simulated; differentiate what can.
 """
 from .materials import (SI3N4_LUKE2015, SIO2_MALITSON1965,
-                        SellmeierMaterial, dispersion_shape, layer_index,
-                        sellmeier)
+                        SellmeierMaterial, TabulatedMaterial,
+                        dispersion_shape, layer_index, sellmeier)
 from .tmm import (bandpass_weights, merit, notch_weights, reflectance,
-                  stack_rt, transmittance)
+                  stack_rt, transmittance, weights_from_reflectance)
 from .adjoint import merit_and_grad, transmittance_and_grads
 from .process import PAPER_PROCESS, DepositionProcess
 from .twins import GaussianTwin, apply_errors, errors_from_traces
@@ -30,12 +30,13 @@ from .data import load_traces_csv, save_traces_csv, validate_traces
 from .fidelity import (distribution_distances, induced_merits,
                        moment_errors, twin_fidelity_report)
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
-    "SellmeierMaterial", "SI3N4_LUKE2015", "SIO2_MALITSON1965",
+    "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
+    "SIO2_MALITSON1965",
     "sellmeier", "dispersion_shape", "layer_index",
     "transmittance", "reflectance", "stack_rt", "merit",
-    "notch_weights", "bandpass_weights",
+    "notch_weights", "bandpass_weights", "weights_from_reflectance",
     "transmittance_and_grads", "merit_and_grad",
     "DepositionProcess", "PAPER_PROCESS",
     "GaussianTwin", "errors_from_traces", "apply_errors",

@@ -106,6 +106,21 @@ class FabTwinConfig:
     hidden: tuple = (128, 128)
     out_scale: float = 0.30       # tanh head bound on |errors|
 
+    def __post_init__(self):
+        # the conditioner normalizes recipes by (hi - lo), so the
+        # twin's box must be strictly increasing scalars; the frozen
+        # (lo == hi) and per-layer bounds of the core DesignBox are a
+        # design-space feature, not a conditioning feature
+        for lo, hi, what in ((self.t_lo, self.t_hi, "t"),
+                             (self.n_lo, self.n_hi, "n")):
+            if np.ndim(lo) != 0 or np.ndim(hi) != 0 \
+                    or not float(hi) > float(lo):
+                raise ValueError(
+                    f"FabTwinConfig {what}-bounds must be strictly "
+                    "increasing scalars (the recipe conditioner "
+                    "normalizes by hi - lo); frozen or per-layer "
+                    "bounds belong to fabtwin.design.DesignBox")
+
     @property
     def dim_x(self):
         return 2 * self.n_layers
