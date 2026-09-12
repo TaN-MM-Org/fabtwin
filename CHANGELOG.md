@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.3.0 (2026-09-12)
+
+Experimental-adaptability release: the three inputs a laboratory
+actually has -- a measured dispersion table, a fixed set of deposited
+materials, and a reflectance specification -- now enter the loop
+directly.
+
+### Added
+
+- `TabulatedMaterial`: measured n(lam) tables (ellipsometry output,
+  vendor datasheets, refractiveindex.info tabulations) used directly,
+  with no Sellmeier fit required. Shape-preserving PCHIP
+  interpolation, refusal outside the tabulated range (the same rule
+  as the Sellmeier built-ins), and a mandatory `reference`. An
+  optional extinction column feeds the absorbing forward solver
+  through `.nk()`; `.n()` refuses an absorbing table rather than
+  silently dropping k, because the design path is lossless. Anchors:
+  exact at the tabulated nodes; between nodes, a table sampled from
+  the cited Malitson Sellmeier agrees with the independent closed
+  form; the whole design path (shape, solver, hand adjoint vs finite
+  differences) runs on a tabulated material end to end.
+- Per-layer and frozen design boxes: every `DesignBox` bound now
+  accepts a scalar or an (N,) array, and a bound pair with lo == hi
+  freezes that parameter -- so a real multi-material stack, whose
+  indices are deposited materials rather than design variables,
+  enters the identical engine. `DesignBox.thickness_only` builds the
+  common case. Anchors: the design engine and the CVaR robustifier
+  return a frozen index profile EXACTLY; per-layer sampling and
+  clipping respect each layer's window; a fully frozen box is
+  refused.
+- `weights_from_reflectance`: reflectance-based linear merits
+  (mirrors, high reflectors) converted to transmittance weights by
+  the exact lossless identity R = 1 - T, so they run through the
+  same hand adjoint unchanged. Anchors: lossless agreement at
+  machine precision through the solver's R + T = 1; on an absorbing
+  stack the identity fails by exactly w_R . A (asserted as an exact
+  relation), which is the documented scope, and the quarter-wave
+  (HL)^3 mirror scores its closed-form admittance reflectance
+  through this path.
+- The thickness-only metrology path (a tool that logs thickness but
+  not per-run index: set n_fab = n_recipe in the trace contract) is
+  now documented and anchored: the fitted twin invents no index
+  errors beyond numerical jitter, and robustification on a
+  frozen-index box consumes exactly the information the lab has.
+
+### Changed
+
+- `FabTwinConfig` validates its bounds (strictly increasing
+  scalars): the learned twin's recipe conditioner normalizes by
+  hi - lo, so frozen or per-layer bounds -- a design-space feature of
+  `DesignBox` -- are refused there with an explanation instead of
+  producing division by zero.
+
 ## 0.2.0 (2026-09-10)
 
 Real-data release: the pipeline the paper names as the essential next

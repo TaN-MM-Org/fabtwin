@@ -36,7 +36,11 @@ physics agreeing is the package's core cross-validation.
   arbitrary stratified stacks: normal or oblique incidence (s/p),
   absorbing layers (n + ik, gain refused), reflectance/transmittance,
   and linear-in-T merit builders (fluorescence-rejection notch and
-  bandpass, per the paper's sensor front-ends). Cross-validated against
+  bandpass, per the paper's sensor front-ends; new in v0.3,
+  `weights_from_reflectance` converts a mirror or high-reflector
+  merit through the exact lossless identity R = 1 - T, so
+  reflectance specifications run through the same adjoint).
+  Cross-validated against
   the open `tmm` reference (Byrnes, arXiv:1603.02720) to 1e-12 and
   against closed forms: bare-interface Fresnel, the exact absentee
   half-wave layer, the exact quarter-wave antireflection transform, the
@@ -51,9 +55,14 @@ physics agreeing is the package's core cross-validation.
   quarter-wave optimum.
 - `fabtwin.materials` -- a cited Sellmeier engine (Si3N4: Luke 2015;
   fused silica: Malitson 1965; both CC0 via refractiveindex.info) with
-  validity-range refusal instead of silent extrapolation, and the
+  validity-range refusal instead of silent extrapolation, the
   variable-index layer construction of the single-material SiNx
-  platform (Yesilyurt 2023).
+  platform (Yesilyurt 2023), and (new in v0.3) `TabulatedMaterial`:
+  your measured n(lam) table -- ellipsometry output, a vendor
+  datasheet -- used directly through shape-preserving interpolation,
+  no Sellmeier fit required, with the same out-of-range refusal and a
+  mandatory source reference. An optional extinction column serves
+  the absorbing forward solver via `.nk()`.
 - `fabtwin.process` -- the six-mechanism virtual deposition process of
   the FabGAN-ID benchmark as a parametric dataclass (systematic bias,
   index drift, intermixing, design-conditional AR(1) thickness noise,
@@ -68,7 +77,12 @@ physics agreeing is the package's core cross-validation.
   Monte-Carlo scoring of a design under any process or twin.
 - `fabtwin.design` -- the probe-seeded projected-Adam adjoint engine
   and its equal-budget random-search baseline; recovers the analytic
-  quarter-wave optimum in the tests.
+  quarter-wave optimum in the tests. New in v0.3, every `DesignBox`
+  bound is a scalar or per-layer array and lo == hi freezes a
+  parameter, so a classic multi-material stack -- indices set by the
+  deposited materials, only thicknesses designed
+  (`DesignBox.thickness_only`) -- runs through the identical engine,
+  with the frozen profile returned exactly.
 - `fabtwin.robust` -- pathwise CVaR (or mean − beta*sigma)
   robustification in pure NumPy for affinely reparameterized twins,
   with the frozen-latent gradient anchored against finite differences.
@@ -146,6 +160,13 @@ rep = ft.twin_fidelity_report(                             # score on the rest
     [(rt[0], rn[0])], lam, S, w, c0, n_sub=nsub)
 ```
 
+If your tool logs thickness but not per-run index -- the common case
+for in-situ monitoring -- set `n_fab = n_recipe` in the trace file:
+the fitted twin then carries no invented index errors (asserted in
+the tests to numerical jitter), and robustification on a frozen-index
+box (`DesignBox.thickness_only`) uses exactly the information the
+lab has.
+
 Honest scope: a held-out split certifies the twin against your fab's
 *recorded* behavior; it cannot certify error patterns the tool has
 never logged, the paper's yield-gain numbers are established within
@@ -155,7 +176,7 @@ Applicability caveat).
 
 ## Status
 
-v0.2.0 (alpha). Implemented and tested (52 tests, Python 3.10-3.13;
+v0.3.0 (alpha). Implemented and tested (63 tests, Python 3.10-3.13;
 the JAX extra's tests skip cleanly without it): everything listed
 above, with every physics claim anchored to a closed form, an
 independent reference implementation, or an exact identity -- never to
@@ -163,8 +184,10 @@ a stored number. The adaptation testbench runs the complete loop on a
 platform the paper never touched (a two-material Si3N4/SiO2 mirror
 with per-layer dispersion, held to the textbook quarter-wave-stack
 closed form) and exercises user-registered materials end to end, so
-"generalizes" is a test result, not a claim. The API may change
-before v1.0.
+"generalizes" is a test result, not a claim; v0.3 extends it to
+measured dispersion tables, frozen-index multi-material design,
+reflectance merits and thickness-only metrology -- each anchored the
+same way. The API may change before v1.0.
 
 Deliberate scope, designed out with reasons rather than overlooked:
 
