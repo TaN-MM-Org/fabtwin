@@ -5,16 +5,18 @@
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.22697049-blue)](https://doi.org/10.5281/zenodo.22697049)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**Learned generative process twins for yield-aware inverse design of
-multilayer optics.** Real deposition errors are systematic,
-layer-correlated, design-conditional, skewed and heavy-tailed, and
-manufacturing yield is decided precisely in the tail that hand-specified
-Gaussian tolerance models represent worst. `fabtwin` is the generalized
-library form of the FabGAN-ID framework (Mahim, Islam, Rahman and
-Mohsin, *IEEE Sensors Journal*, 2026): learn the fabrication process
-from historical (recipe, outcome) traces, then robustify designs by
-ascending the yield-deciding lower-tail statistic **pathwise through the
-learned twin and the exact physics at once**.
+Design optical filters that survive their own fabrication. A
+deposition tool never builds exactly the stack you asked for, and the
+worst few percent of its errors -- not the average -- decide how many
+devices pass spec. `fabtwin` learns how *your* tool actually errs
+from its historical (recipe, outcome) logs, then reshapes the design
+so that its worst-case outcomes are as good as possible, by exact
+gradients flowing **through the learned error model and the exact
+optics at once**. It is the generalized library form of the FabGAN-ID
+framework (Mahim, Islam, Rahman and Mohsin, *IEEE Sensors Journal*,
+2026); real deposition errors are systematic, layer-correlated,
+design-dependent, skewed and heavy-tailed, which is precisely what
+hand-specified Gaussian tolerance models represent worst.
 
 > Learn what cannot be simulated; differentiate what can.
 
