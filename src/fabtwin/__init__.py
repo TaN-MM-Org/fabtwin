@@ -27,10 +27,11 @@ from .risk import (cvar, evaluate_under_process, pass_fail,
 from .design import DesignBox, adam_ascent, inverse_design, random_search
 from .robust import cvar_objective_and_grad, robustify
 from .data import load_traces_csv, save_traces_csv, validate_traces
+from .reverse import SpectrumRecovery, errors_from_spectrum
 from .fidelity import (distribution_distances, induced_merits,
                        moment_errors, twin_fidelity_report)
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",
@@ -45,6 +46,7 @@ __all__ = [
     "DesignBox", "inverse_design", "random_search", "adam_ascent",
     "cvar_objective_and_grad", "robustify",
     "load_traces_csv", "save_traces_csv", "validate_traces",
+    "SpectrumRecovery", "errors_from_spectrum",
     "moment_errors", "distribution_distances", "induced_merits",
     "twin_fidelity_report",
 ]
