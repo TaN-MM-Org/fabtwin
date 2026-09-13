@@ -74,6 +74,12 @@ physics agreeing is the package's core cross-validation.
 - `fabtwin.twins` -- the common error parameterization
   x = (t̃/t − 1, ñ − n) with exact round trip, and Gaussian twins
   (diagonal/full) as differentiable parametric baselines.
+- `fabtwin.reverse` (new in v0.4) -- `errors_from_spectrum`: the
+  per-layer thickness errors of a finished stack, recovered from one
+  measured transmittance spectrum and the recipe by multi-start
+  least squares with exact adjoint gradients; refuses -- rather than
+  guesses -- underdetermined, degenerate or non-unique recoveries
+  (details in "Bring your own fabrication data" below).
 - `fabtwin.risk` -- CVaR (exact sorted-tail convention, Rockafellar &
   Uryasev 2000), tail statistics, the hard pass/fail filter yield, and
   Monte-Carlo scoring of a design under any process or twin.
