@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 (2026-09-13)
+
+Reverse-engineering release: per-layer thickness errors from one
+measured spectrum, with the reliability analysis built in.
+
+### Added
+
+- `errors_from_spectrum` / `SpectrumRecovery`: recover the per-layer
+  relative thickness errors of a fabricated stack from a single
+  measured transmittance spectrum and the recipe -- weighted least
+  squares through the exact transfer-matrix physics with the exact
+  hand-derived adjoint Jacobian, multi-start against local minima,
+  per-layer uncertainties from the Jacobian (residual-scaled when no
+  noise level is given), chi-square and conditioning reported.
+  Reliability is refused, not guessed, three ways (Tikhonravov and
+  Trubetskov, Appl. Opt. 51, 245 (2012); Amotchkina, Trubetskov,
+  Pervak and Tikhonravov, Appl. Opt. 51, 5543 (2012)): fewer
+  spectral points than layers; a singular Jacobian, pinned in the
+  tests by the exact degeneracy that adjacent same-index layers
+  enter the transfer matrix only through their thickness sum; and
+  distinct error vectors fitting the spectrum equally well.
+  Indices stay fixed at the recipe values, deliberately: joint
+  thickness-and-index recovery from one normal-incidence spectrum is
+  the classically unreliable problem the cited papers dissect.
+- Anchors: noise-free round trip to 1e-6 through the exact physics;
+  exact zero recovery on a perfect deposition; uncertainty
+  calibration on seeded noise (z-scores bounded, chi2 consistent
+  with dof); all three refusals exercised.
+
 ## 0.3.0 (2026-09-12)
 
 Experimental-adaptability release: the three inputs a laboratory

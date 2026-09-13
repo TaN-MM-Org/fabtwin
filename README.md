@@ -133,6 +133,23 @@ The learned twin drops in through the `[twin]` extra:
 
 ## Bring your own fabrication data
 
+New in v0.4, you do not even need per-layer metrology to start:
+`errors_from_spectrum` recovers the per-layer thickness errors of a
+finished stack from one measured transmittance spectrum and the
+recipe, by multi-start least squares through the exact physics with
+exact adjoint Jacobians. It reports per-layer uncertainties and
+refuses -- rather than guesses -- when the answer is not trustworthy:
+too few spectral points, an exactly invisible direction (adjacent
+same-index layers enter only through their thickness sum), or several
+distinct error vectors fitting the spectrum equally well, the
+reliability failure the reverse-engineering literature dissects
+(Tikhonravov and Trubetskov, Appl. Opt. 51, 245 (2012); Amotchkina et
+al., Appl. Opt. 51, 5543 (2012)). Indices stay fixed at the recipe:
+joint thickness-and-index recovery from one normal-incidence spectrum
+is the classically unreliable problem, so it is designed out, not
+half-shipped. Each recovered spectrum gives one error vector; a
+run of them is exactly the trace set the twins below consume.
+
 The twins never see a simulator -- they consume (recipe, outcome)
 traces, which is exactly what a monitored deposition tool logs. The
 paper is a fully simulation-based study and names a twin trained on
@@ -178,7 +195,7 @@ Applicability caveat).
 
 ## Status
 
-v0.3.0 (alpha). Implemented and tested (63 tests, Python 3.10-3.13;
+v0.4.0 (alpha). Implemented and tested (67 tests, Python 3.10-3.13;
 the JAX extra's tests skip cleanly without it): everything listed
 above, with every physics claim anchored to a closed form, an
 independent reference implementation, or an exact identity -- never to
