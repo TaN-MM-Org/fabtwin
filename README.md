@@ -199,9 +199,35 @@ its virtual setting, and in production the twin needs periodic
 retraining on fresh traces as the tool drifts (the paper's own
 Applicability caveat).
 
+## Plan the calibration runs
+
+Before any trace exists there are two decisions: which recipes the
+calibration runs should deposit, and how many runs to pay for. Both
+are now tools:
+
+```python
+import fabtwin as ft
+
+box = ft.DesignBox(6, 0.04, 0.16, 1.7, 2.1)
+rt, rn = ft.design_recipes(box, n_recipes=8, seed=0)   # spread recipes
+# ... deposit, log traces, then:
+x = ft.errors_from_traces(rt_log, rn_log, ft_log, fn_log)
+M, se = ft.runs_for_twin_mean(0.004, x)   # runs for a target accuracy
+```
+
+`design_recipes` spreads the recipes over the box by a deterministic
+greedy maximin rule (the classic space-filling criterion; Johnson,
+Moore and Ylvisaker, J. Statist. Plann. Inference 26, 131 (1990)) in
+box-normalized coordinates, so frozen parameters carry no distance;
+the tests re-derive every pick. `runs_for_twin_mean` is a closed
+form, not a search: for independent runs the standard error of each
+estimated mean-error component after M runs is exactly
+sqrt(variance/M), evaluated on a pilot trace set -- and refused when
+the pilot is too small to estimate the variances it stands on.
+
 ## Status
 
-v0.4.0 (alpha). Implemented and tested (67 tests, Python 3.10-3.13;
+v0.5.0 (alpha). Implemented and tested (73 tests, Python 3.10-3.13;
 the JAX extra's tests skip cleanly without it): everything listed
 above, with every physics claim anchored to a closed form, an
 independent reference implementation, or an exact identity -- never to

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 (2026-09-17)
+
+Lab adaptability: the calibration runs planned before the tool time
+is booked.
+
+- `lab.design_recipes`: deterministic greedy maximin spreading of
+  calibration recipes over the `DesignBox` (Johnson, Moore and
+  Ylvisaker, J. Statist. Plann. Inference 26, 131 (1990)), in
+  box-normalized coordinates so a micron and an index unit are
+  compared fairly and frozen parameters carry exactly zero distance.
+- `lab.runs_for_twin_mean`: the run count for a target twin-mean
+  accuracy, in closed form -- the standard error of each estimated
+  mean-error component after M independent runs is exactly
+  sqrt(variance/M) -- from a pilot trace set, refused when the pilot
+  is too small to estimate the variances the plan stands on.
+- Anchors: every greedy pick re-derived independently in the tests;
+  designs respect the box exactly, are deterministic per seed, and
+  ignore frozen axes exactly; the run-count inversion verified on
+  both sides of the target; 60 seeded replications of the shipped
+  PAPER_PROCESS match the predicted standard error.
+
 ## 0.4.0 (2026-09-13)
 
 Reverse-engineering release: per-layer thickness errors from one
