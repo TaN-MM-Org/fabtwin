@@ -225,9 +225,31 @@ estimated mean-error component after M runs is exactly
 sqrt(variance/M), evaluated on a pilot trace set -- and refused when
 the pilot is too small to estimate the variances it stands on.
 
+## A guarantee that does not trust the twin
+
+The twin's own error bars are only as good as the twin. Split
+conformal prediction converts held-out runs into intervals with an
+exact finite-sample guarantee that needs no trust in any model at
+all (Vovk, Gammerman and Shafer (2005); Lei et al., J. Am. Stat.
+Assoc. 113, 1094 (2018); Angelopoulos and Bates, arXiv:2107.07511):
+
+```python
+import fabtwin as ft
+
+q = ft.conformal_quantile(heldout_abs_errors, alpha=0.1)  # 90%
+lo, hi = ft.conformal_interval(twin_predictions, q)
+```
+
+A new run, exchangeable with the held-out ones, lands inside with
+probability at least 90% -- exactly, at finite n, whatever the
+process does. The guarantee is marginal and needs exchangeability
+(runs from before a tool drift do not certify runs after it -- the
+same retraining caveat the twin itself carries), and an uncertifiable
+level is refused with the minimum held-out count named.
+
 ## Status
 
-v0.5.0 (alpha). Implemented and tested (73 tests, Python 3.10-3.13;
+v0.6.0 (alpha). Implemented and tested (77 tests, Python 3.10-3.14;
 the JAX extra's tests skip cleanly without it): everything listed
 above, with every physics claim anchored to a closed form, an
 independent reference implementation, or an exact identity -- never to
