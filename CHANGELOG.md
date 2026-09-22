@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.6.1 (2026-09-22)
+
+Bug-fix and documentation release.
+
+### Fixed
+
+- `transmittance_and_grads` and `merit_and_grad` (and so
+  `inverse_design`, `adam_ascent`, `robustify`,
+  `cvar_objective_and_grad` and `errors_from_spectrum`, which call
+  them) refused complex thicknesses and indices but silently took the
+  real part of a complex dispersion `shape`, a complex `n_sub` array,
+  or a NumPy complex scalar `n_sub` or `n_inc` (NumPy issued only a
+  `ComplexWarning`). The returned `T` and
+  gradients then described a different, non-absorbing stack: for
+  three layers of index 2.0 and thickness 0.06 um on a substrate
+  `1.5 + 0.2i`, 0.6.0 returned T = 0.807 at 0.45 um where
+  `fabtwin.tmm` gives T = 0.787. A complex `shape`, `n_sub` or `n_inc`
+  is now refused with a ValueError, like a complex index. Only calls
+  with such complex inputs, outside the documented lossless scope,
+  are affected; a Python `complex` scalar `n_sub` or `n_inc`
+  previously raised a TypeError and now raises the same ValueError.
+  As for thicknesses and indices already, the check is on the data
+  type: a complex-typed array with zero imaginary part (for example
+  `TabulatedMaterial.nk()` of a table without `k`, which 0.6.0
+  accepted with a warning) is now refused too; pass the real values
+  (`.n()`).
+
+### Tests
+
+- New `test_adjoint.py::test_absorbing_shape_or_substrate_is_refused_not_truncated`
+  (fails on 0.6.0, passes now). 78 tests in total.
+- The full suite was run on Python 3.10 with the oldest versions
+  `pyproject.toml` allows (NumPy 1.26.0, SciPy 1.11.0, JAX 0.4.30,
+  jaxlib 0.4.30, optax 0.2.0, tmm 0.1.8): all pass. CI now has an
+  `oldest-dependencies` job that pins these versions.
+
+### Changed
+
+- README rewritten for readers outside the field: a guide to the
+  terms, requirements and units, nine worked examples with their
+  printed output (checked by running them), every public name listed,
+  the refusals, and each test check with the tolerance the test
+  actually uses.
+
+### Corrections to earlier notes
+
+- Version 0.6.0 (`fabtwin.conformal`: `conformal_quantile`,
+  `conformal_interval`, `conformal_coverage_exact`) had no CHANGELOG
+  entry; its tests are in `tests/test_conformal.py`.
+- Some earlier entries and the 0.6.0 README describe checks as exact
+  or "at machine precision" where the tests use a tolerance:
+  "matches central finite differences at the paper's accuracy
+  figure" (0.1.0; the test asserts a median relative error below
+  1e-8 and a maximum below 1e-6, while the paper's figure is about
+  1e-10); the adjoint gradient "vanishes exactly" at the quarter-wave
+  optimum (below 1e-12); "exact zero recovery on a perfect
+  deposition" (0.4.0; below 1e-8); interpolation "exact at the
+  tabulated nodes" (0.3.0; to 1e-15); lossless reflectance identity
+  "at machine precision" and the absorbing gap "asserted as an exact
+  relation" (0.3.0; both to 1e-12); JAX autodiff equal to the hand
+  adjoint "to machine precision" (0.6.0 README; to 1e-12); the
+  error round trip "exact" (to 1e-15); a thickness-only twin's
+  index errors "to numerical jitter" (0.3.0 README; below 1e-3). The
+  0.5.0 replication check matches the predicted standard error within
+  35 % (rtol 0.35) for the largest component.
+
 ## 0.5.0 (2026-09-17)
 
 Lab adaptability: the calibration runs planned before the tool time
