@@ -34,7 +34,7 @@ from .conformal import (conformal_coverage_exact, conformal_interval,
 from .fidelity import (distribution_distances, induced_merits,
                        moment_errors, twin_fidelity_report)
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",

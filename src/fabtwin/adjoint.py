@@ -41,7 +41,8 @@ __all__ = ["merit_and_grad", "transmittance_and_grads"]
 
 
 def _layer_data(lam_um, t_um, n0, shape, n_sub):
-    if np.iscomplexobj(np.asarray(t_um)) or np.iscomplexobj(np.asarray(n0)):
+    if any(np.iscomplexobj(np.asarray(a))
+           for a in (t_um, n0, shape, n_sub)):
         raise ValueError("the hand adjoint covers real (lossless) "
                          "designs; use fabtwin.tmm for absorbing stacks")
     lam = np.asarray(lam_um, dtype=float)
@@ -72,6 +73,9 @@ def transmittance_and_grads(lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0):
     lam, t, n0v, S, n, delta, eta, eta_sub = _layer_data(
         lam_um, t_um, n0, shape, n_sub)
     N, L = delta.shape
+    if np.iscomplexobj(np.asarray(n_inc)):
+        raise ValueError("the hand adjoint covers real (lossless) "
+                         "designs; use fabtwin.tmm for absorbing stacks")
     eta0 = float(n_inc)
     c = np.cos(delta)
     s = np.sin(delta)
