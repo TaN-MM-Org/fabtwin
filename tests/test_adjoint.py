@@ -73,6 +73,25 @@ def test_absorbing_designs_are_refused():
                                    np.full(3, 2.0), S, n_sub=NSUB)
 
 
+def test_absorbing_shape_or_substrate_is_refused_not_truncated():
+    """A complex dispersion shape or substrate index (e.g. from
+    TabulatedMaterial.nk) is outside the lossless scope; before 0.6.1
+    its imaginary part was silently dropped (a NumPy ComplexWarning
+    only) and T disagreed with fabtwin.tmm. It must be refused."""
+    lam = np.linspace(0.45, 0.65, 5)
+    t = np.full(3, 0.06)
+    n0 = np.full(3, 2.0)
+    with pytest.raises(ValueError, match="lossless"):
+        ft.transmittance_and_grads(lam, t, n0, np.ones(5) * (1 + 0.05j),
+                                   n_sub=1.5)
+    with pytest.raises(ValueError, match="lossless"):
+        ft.transmittance_and_grads(lam, t, n0, np.ones(5),
+                                   n_sub=np.full(5, 1.5 + 0.2j))
+    with pytest.raises(ValueError, match="lossless"):
+        ft.merit_and_grad(lam, t, n0, np.ones(5), np.ones(5), 0.0,
+                          n_inc=1.0 + 0.1j, n_sub=1.5)
+
+
 def test_agrees_with_jax_autodiff_when_available():
     """Two independent derivations of the same discrete adjoint --
     hand algebra here, reverse-mode autodiff in the twin extra --
