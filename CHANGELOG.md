@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.7.0 (2026-09-23)
+
+Gradients at any angle and with absorption, merits beyond w . T, an
+unbiased gradient for CVaR design, drift and novelty checks, joint thickness and
+index recovery, drift-robust and per-group conformal bands, in-run
+correction, and one bug fix.
+
+### Fixed
+
+- Beyond the critical angle of a lossless substrate, `stack_rt`,
+  `transmittance` and `reflectance` took the growing instead of the
+  decaying square root for `n cos(theta)` (layers inside the stack are
+  unaffected: either root gives the same result there). `T` is 0
+  either way, and with all layers lossless `R = 1` either way; with
+  absorption in the stack `R` was wrong: glass (1.52) -> 100 nm of 1.38 -> 80 nm
+  of 2.1 + 0.05i -> air at 0.8 rad (s) gave R = 0.938 where the
+  independent `tmm` package gives 0.888 (as 0.7.0 does). Results below
+  every critical angle are bit-for-bit unchanged (286 random cases).
+  The comparison with `tmm` now covers oblique, absorbing and
+  beyond-critical stacks (200 random cases, 1e-12); before, it was
+  normal incidence only.
+
+### Added
+
+- `gradients.stack_rta_and_grads`, `layer_indices`: exact derivatives
+  of R, T and A with respect to thickness, index and extinction, any
+  angle, s, p or unpolarized light, absorbing layers and substrates.
+- `merits`: `LinearMerit` (on R, T or A), `TargetMerit`,
+  `SpecMarginMerit` (J > 0 guarantees the pass/fail spec),
+  `FunctionMerit`, `OpticalModel` (merit + angles + absorption),
+  `model_spectra`, `model_merit_and_grad`. `inverse_design`,
+  `adam_ascent`, `random_search`, `robustify`,
+  `cvar_objective_and_grad`, `evaluate_under_process`,
+  `induced_merits` and `twin_fidelity_report` accept `model=`.
+- `robustify(estimator="ru")` and `ru_objective_and_grad`: the
+  Rockafellar-Uryasev objective (its maximum over the threshold is
+  the CVaR), with an unbiased minibatch gradient;
+  `TwinEnsemble`: bootstrap ensemble of Gaussian twins.
+- `fidelity.energy_distance`, `drift_test` (permutation test),
+  `novelty_pvalues` (conformal p-values per run).
+- `reverse.Measurement`, `errors_from_spectra`, `JointRecovery`:
+  several spectra at once, thickness and optional index errors,
+  optional parametric bootstrap; all refusals kept.
+- `conformal.mondrian_quantiles` (per-group guarantee) and
+  `AdaptiveConformal` (Gibbs and Candes, NeurIPS 2021: long-run miss
+  rate under drift, with its deterministic bound).
+- `GaussianTwin.conditional`: the exact Gaussian conditional given
+  measured error components.
+- `correct.reoptimize_remaining`: re-design the layers not yet
+  deposited, nominal or robust (with a conditioned twin);
+  `first="substrate"` (default) or `"incidence"` names the end grown
+  first. `TwinEnsemble.conditional` conditions every member.
+- `stack_rt`, `transmittance`, `reflectance` accept `pol="u"`
+  (unpolarized: the mean of s and p).
+- `design_recipes(refine=True)` (exchange improvement of the greedy
+  maximin design) and `lab.maximin_distance`.
+
+Defaults are unchanged: every valid 0.6.1 call gives the same result,
+bit for bit, except the beyond-critical-angle fix above. Changed for
+invalid input only: p polarization with a substrate exactly at its
+critical angle is refused (it returned NaN); `errors_from_spectrum`
+reports input errors (for example a wrong shape) directly instead of
+"no multi-start converged".
+
+### Tests
+
+117 tests (78 in 0.6.1). New files: `test_gradients_merits.py`,
+`test_robust_ru.py`, `test_drift_conformal_joint.py`,
+`test_correct_lab.py`. Independent references: the `tmm` package, a
+separate JAX implementation differentiated automatically, finite
+differences, closed-form conditionals, seeded simulations. Passed on
+Python 3.11 (NumPy 2.4, SciPy 1.17, JAX 0.10), with the core install
+only on Python 3.12, and on the oldest allowed versions (Python 3.10,
+NumPy 1.26.0, SciPy 1.11.0, JAX 0.4.30, optax 0.2.0, tmm 0.1.8).
+
+### Changed
+
+- README: seven new examples (10 to 16) with checked output, the new
+  functions, refusals and checks, and a rewritten Limits section.
+
 ## 0.6.1 (2026-09-22)
 
 Bug-fix and documentation release.

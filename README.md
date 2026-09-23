@@ -31,7 +31,14 @@ It answers questions such as:
 - Which recipes should the calibration runs use, and how many runs are
   needed?
 - What error band around a prediction holds for a stated fraction of
-  new runs, without trusting any model?
+  new runs, without trusting any model, and how does it keep holding
+  while the machine drifts?
+- Has the machine changed since the twin was fitted, and is a new run
+  unlike anything it has done before?
+- From measurements at several angles, how far were both the
+  thicknesses and the indices from the recipe?
+- Halfway through a run, how should the remaining layers change to
+  make up for the errors already made?
 
 The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
@@ -69,14 +76,25 @@ looks fine but is not.
   substrate. Layer `i` has a thickness `t_i` (micrometres) and a
   refractive index `n_i`. Light arrives from the incidence medium
   (air, index 1, by default).
-- **Transmittance `T` and reflectance `R`** -- the fraction of light
-  power that passes through, or bounces back, at each wavelength.
-  For layers that absorb nothing, `R + T = 1`.
+- **Transmittance `T`, reflectance `R`, absorptance `A`** -- the
+  fraction of light power that passes through, bounces back, or is
+  absorbed, at each wavelength; `R + T + A = 1`. For layers that
+  absorb nothing, `A = 0`. An absorbing material has a complex index
+  `n + i k`; the **extinction coefficient** `k` sets how strongly it
+  absorbs.
+- **Layer order** -- layer 0 is the one next to the incidence medium,
+  layer `N - 1` the one on the substrate. A coating is grown on the
+  substrate, so in a real run layer `N - 1` is usually deposited first
+  (the simulated `DepositionProcess` instead runs its correlated noise
+  and intermixing in array order, from layer 0).
 - **Normal and oblique incidence; s and p polarization** -- light
   arriving straight on (normal) or at an angle (oblique). At an angle,
   the result depends on the direction in which the light's electric
   field oscillates: across the plane of incidence (`"s"`) or within it
-  (`"p"`).
+  (`"p"`); `"u"` is unpolarized light, the average of the two. Beyond
+  the **critical angle** (light going from a higher to a lower index
+  at a steep angle) no light travels into the lower-index medium; the
+  wave there only decays (it is **evanescent**).
 - **Transfer-matrix method (TMM)** -- the standard exact calculation
   of `R` and `T` for a layer stack: one 2x2 matrix per layer,
   multiplied together (Macleod, *Thin-Film Optical Filters*).
@@ -86,8 +104,10 @@ looks fine but is not.
   as `n_i(lam) = n0_i * S(lam)`, where `n0_i` is the index at a
   reference wavelength and `S` is the **dispersion shape** of the
   material (exactly 1 at the reference wavelength).
-- **Merit `J`** -- one number scoring a spectrum, higher is better. It
-  is always a weighted sum `J = w . T + const`. The built-in **notch**
+- **Merit `J`** -- one number scoring a spectrum, higher is better.
+  The original design functions use a weighted sum `J = w . T + const`;
+  since 0.7.0 a merit can be any smooth function of `R`, `T` and the
+  absorbed fraction `A` (see `OpticalModel`). The built-in **notch**
   merit (block one laser line, pass everything else) is
   `J = 0.5 * (mean T in the pass bands) + 0.5 * (mean of 1 - T in the stop band)`:
   1 for a perfect notch, 0 for the exact opposite.
@@ -132,7 +152,19 @@ looks fine but is not.
   error band that contains a stated fraction of new runs, without
   assuming any model is right. It needs the new runs to be
   **exchangeable** with the held-out ones (roughly: from the same,
-  unchanged process).
+  unchanged process). A **Mondrian** version does this separately for
+  each group of runs (for example each recipe). A **conformal p-value**
+  ranks a new run among held-out ones: a small value means the run is
+  unlike them.
+- **Unbiased estimate, minibatch** -- `robustify` estimates the
+  gradient from a small random batch of simulated devices (a
+  minibatch) at each step; an estimate is **unbiased** when its average
+  over many batches equals the exact value.
+- **Permutation test, energy distance** -- to ask whether two sets of
+  runs come from the same machine, compute a distance between them
+  (the energy distance, zero only for identical distributions), then
+  see how often shuffling the runs between the two sets gives a
+  distance at least as large; that fraction is the p-value.
 
 ## Install and requirements
 
@@ -151,8 +183,10 @@ Units and conventions:
   532 nm).
 - Indices of design layers are given at a reference wavelength and
   are real numbers. An absorbing material is written `n + i k` with
-  `k >= 0`; the forward optics accept it, the design and gradient path
-  does not (see [Limits](#limits)).
+  `k >= 0`. The original gradient functions (`transmittance_and_grads`,
+  `merit_and_grad`) are for non-absorbing stacks at normal incidence;
+  the general ones added in 0.7.0 (`stack_rta_and_grads`, and every
+  function that takes `model=`) also handle absorption and any angle.
 - Angles are in radians; polarization is `"s"` or `"p"`.
 - Error vectors are `(relative thickness errors, absolute index
   errors)`, as defined above.
@@ -162,7 +196,7 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.6.1 (NumPy 2.4, SciPy 1.17, JAX 0.10 on
+printed with fabtwin 0.7.0 (NumPy 2.4, SciPy 1.17, JAX 0.10 on
 Linux). Wavelength ranges, stacks, error sizes and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
@@ -578,6 +612,328 @@ A table may include an extinction column `k_table`; then `.n()`
 refuses (the design path is lossless) and `.nk()` gives `n + i k` for
 the forward optics.
 
+### 10. Gradients at an angle, with absorption
+
+```python
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.45, 0.75, 7)
+t = np.array([0.080, 0.110, 0.012])              # the last layer: a thin metal-like film
+n = np.array([2.10, 1.46, 0.50 + 3.0j])          # n + i k; k > 0 absorbs
+g = ft.stack_rta_and_grads(lam, t, n, n_inc=1.0, n_sub=1.52,
+                           theta0_rad=np.deg2rad(45), pol="u")
+print("R + T + A = 1:", np.allclose(g["R"] + g["T"] + g["A"], 1.0))
+print("A at 0.60 um:", round(float(g["A"][3]), 4))
+
+# check dT/dt of the absorbing layer against a finite difference
+h = 1e-6
+Tp = ft.stack_rta_and_grads(lam, t + [0, 0, h], n, 1.0, 1.52, np.deg2rad(45), "u")["T"]
+Tm = ft.stack_rta_and_grads(lam, t - [0, 0, h], n, 1.0, 1.52, np.deg2rad(45), "u")["T"]
+print("exact:", round(float(g["dT_dt"][2, 3]), 6),
+      " finite difference:", round(float((Tp[3] - Tm[3]) / (2 * h)), 6))
+```
+
+```
+R + T + A = 1: True
+A at 0.60 um: 0.1015
+exact: -23.888131  finite difference: -23.888131
+```
+
+`stack_rta_and_grads` gives `R`, `T`, `A = 1 - R - T` and their
+exact derivatives with respect to every thickness, the real part of
+every index and every extinction coefficient `k`, for any angle and
+for s, p or unpolarized (`"u"`) light. It uses the same two-pass
+adjoint idea as the original normal-incidence code; the tests check
+it against finite differences, against the original code at normal
+incidence, and against automatic differentiation of a separate JAX
+implementation.
+
+### 11. A specification instead of a linear merit
+
+```python
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.45, 0.70, 51)
+shape = np.ones(lam.size)                        # dispersionless, for the example
+stop = (lam >= 0.52) & (lam <= 0.545)            # block this band ...
+pas = (lam <= 0.50) | (lam >= 0.565)             # ... and pass these
+conds = ((0.0, "u"), (np.deg2rad(20), "u"))      # straight on and at 20 degrees
+box = ft.DesignBox(20, 0.02, 0.20, 1.45, 2.30)
+
+# 1) a linear notch merit, averaged over both angles, as a starting point
+w, c = ft.notch_weights(lam, 0.5325, 0.0125, 0.02)
+start = ft.OpticalModel(ft.LinearMerit(np.tile(w / 2, (2, 1)), c, "T"), conds)
+t, n, _, _ = ft.inverse_design(lam, shape, None, None, box, n_probe=150,
+                               n_seed=3, n_iter=150, n_sub=1.52, model=start)
+# 2) then the specification itself, as a smooth margin
+model = ft.OpticalModel(ft.SpecMarginMerit(stop, pas, leak_max=0.10,
+                                           pass_min=0.85, sharpness=150.0),
+                        conds)
+t, n, J, _ = ft.adam_ascent(lam, t, n, shape, None, None, box, n_iter=150,
+                            lr=2e-3, n_sub=1.52, model=model)
+R, T, A = ft.model_spectra(model, lam, t, n, shape, 1.0, 1.52)
+for (ang, pol), Tc in zip(model.conditions, T):
+    print(f"{np.rad2deg(ang):4.0f} deg: max T in stop band {Tc[stop].max():.3f}, "
+          f"mean T in pass bands {Tc[pas].mean():.3f}")
+print(f"smooth margin J = {J:.4f}")
+print("meets the spec at both angles:", bool(ft.pass_fail(T, stop, pas, 0.10, 0.85).all()))
+```
+
+```
+   0 deg: max T in stop band 0.042, mean T in pass bands 0.903
+  20 deg: max T in stop band 0.047, mean T in pass bands 0.910
+smooth margin J = 0.0446
+meets the spec at both angles: True
+```
+
+`SpecMarginMerit` scores the pass/fail specification of
+`pass_fail` directly: the worst leakage in the stop band and the mean
+transmission in the pass bands, at every angle in the model, combined
+into one smooth number. It is built never to overstate the margin, so
+`J > 0` guarantees the specification is met (the tests check this on
+3000 random spectra). `TargetMerit` (distance to a target spectrum),
+`LinearMerit` on `R`, `T` or `A`, and `FunctionMerit` (your own
+function and its derivatives) work the same way. Here a linear notch
+merit gives the starting point and the specification margin finishes
+the design.
+
+### 12. Robust design: an unbiased gradient, and an uncertain twin
+
+```python
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.45, 0.65, 61)
+S = ft.dispersion_shape(lam, 0.55)
+w, c = ft.notch_weights(lam, 0.532, 0.012, 0.02)
+box = ft.DesignBox(10, 0.03, 0.15, 1.7, 2.3)
+t, n, J, _ = ft.inverse_design(lam, S, w, c, box, n_probe=120, n_seed=3,
+                               n_iter=40, n_sub=1.46)
+
+rng = np.random.default_rng(3)
+rec_t, rec_n = ft.design_recipes(box, 12)
+x = ft.errors_from_traces(*ft.PAPER_PROCESS.trace_dataset(rec_t, rec_n, 10, rng))
+
+def fab_cvar(tt, nn):        # judged by 600 fresh runs of the reference process
+    s = lambda a, b, K: ft.PAPER_PROCESS.ensemble(a, b, K, np.random.default_rng(99))
+    return ft.evaluate_under_process(s, tt, nn, lam, S, w, c, 600, n_sub=1.46,
+                                     alpha=0.1)["CVaR"]
+
+print(f"nominal design:            CVaR10 = {fab_cvar(t, n):.4f}")
+for label, twin, est in (("sorted worst draws", ft.GaussianTwin(x), "sort"),
+                         ("Rockafellar-Uryasev", ft.GaussianTwin(x), "ru"),
+                         ("RU + twin ensemble", ft.TwinEnsemble(x, n_members=16), "ru")):
+    tr, nr, _ = ft.robustify(lam, t, n, S, w, c, twin, box, alpha=0.1, K=64,
+                             steps=80, n_sub=1.46, estimator=est)
+    print(f"{label:26s} CVaR10 = {fab_cvar(tr, nr):.4f}")
+```
+
+```
+nominal design:            CVaR10 = 0.6165
+sorted worst draws         CVaR10 = 0.6801
+Rockafellar-Uryasev        CVaR10 = 0.6710
+RU + twin ensemble         CVaR10 = 0.6723
+```
+
+`estimator="ru"` ascends the Rockafellar-Uryasev form of CVaR,
+`tau - mean((tau - J)_+) / alpha`, maximized over the threshold `tau`
+together with the design. Its minibatch gradient is unbiased at any
+`K` for that objective at the current `tau`, and that objective is
+the CVaR when `tau` is the `alpha` quantile, which the ascent tracks.
+The paper's estimator (`"sort"`, the default) averages the worst draws
+and is biased at small `K` (the tests show both facts). `TwinEnsemble` refits the
+Gaussian twin on bootstrap resamples of the runs, so the design also
+allows for what a limited number of runs cannot pin down about the
+machine. In this example all three raise the CVaR of the fabricated
+merit by a similar amount; the unbiased gradient is a guarantee about
+the method, not a promise of a better design every time.
+
+### 13. Has the machine drifted? Is this run unusual?
+
+```python
+import dataclasses
+import numpy as np
+import fabtwin as ft
+
+t = np.array([0.07, 0.09, 0.06, 0.11])
+n = np.array([2.1, 1.6, 2.1, 1.6])
+
+def runs(process, K, seed):
+    tf, nf = process.ensemble(t, n, K, np.random.default_rng(seed))
+    return ft.errors_from_traces(np.tile(t, (K, 1)), np.tile(n, (K, 1)), tf, nf)
+
+old = runs(ft.PAPER_PROCESS, 40, 1)
+same = runs(ft.PAPER_PROCESS, 40, 2)
+drifted = runs(dataclasses.replace(ft.PAPER_PROCESS, beta_t=0.04), 40, 3)
+print("same machine:   p =", ft.drift_test(old, same, n_perm=499)["p_value"])
+print("rate bias 2->4%: p =", ft.drift_test(old, drifted, n_perm=499)["p_value"])
+
+# Is this one run unlike anything logged?
+x = runs(ft.PAPER_PROCESS, 600, 4)
+odd = x[:1].copy()
+odd[0, 0] += 0.2                           # a 20 % error on layer 1
+print("ordinary run p =", ft.novelty_pvalues(x[:300], x[300:599], x[599:])[0].round(3),
+      "| unusual run p =", ft.novelty_pvalues(x[:300], x[300:599], odd)[0].round(4))
+
+# Error bands that keep their long-run miss rate while the machine drifts
+rng = np.random.default_rng(5)
+aci = ft.AdaptiveConformal(np.abs(rng.normal(size=100)), alpha=0.1, gamma=0.01)
+q_fixed = ft.conformal_quantile(np.abs(rng.normal(size=100)), 0.1)
+miss_fixed = 0
+for k in range(3000):
+    s = abs(rng.normal(0, 1.0 + 2.0 * (k > 1000) + 0.002 * k))   # a jump, then a ramp
+    miss_fixed += s > q_fixed
+    aci.update(s)
+print(f"fixed band misses {miss_fixed / 3000:.3f} of runs; adaptive band "
+      f"{aci.miss_rate():.3f} (target 0.100, guaranteed within {aci.bound():.3f})")
+```
+
+```
+same machine:   p = 0.534
+rate bias 2->4%: p = 0.002
+ordinary run p = 0.88 | unusual run p = 0.0033
+fixed band misses 0.634 of runs; adaptive band 0.100 (target 0.100, guaranteed within 0.030)
+```
+
+`drift_test` compares the error vectors of old and new runs with a
+permutation test of the energy distance; a small p-value says the
+machine has changed and the twin needs refitting (a large one does
+not prove nothing changed). `novelty_pvalues` gives each new run a
+conformal p-value: for runs like the logged ones,
+`P(p <= u) <= u` on average over runs and calibration sets (any one
+calibration set can be somewhat off), and a run unlike anything
+logged gets a small one.
+`AdaptiveConformal` keeps adjusting its level so that the long-run
+share of missed runs stays at `alpha` even when the process drifts
+(Gibbs and Candes, NeurIPS 2021), with a bound that holds for any
+sequence of runs. A band fixed at the start fails badly once the
+process changes.
+
+### 14. Thickness and index errors together, from several angles
+
+```python
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.40, 0.90, 121)
+S = ft.dispersion_shape(lam, 0.55)
+t0 = np.array([0.070, 0.095, 0.060, 0.110, 0.080])    # recipe (um)
+n0 = np.array([2.2, 1.5, 2.2, 1.5, 2.2])
+xt = np.array([0.03, -0.02, 0.015, 0.01, -0.025])      # what the tool did (unknown)
+dn = np.array([0.02, -0.015, 0.01, 0.0, -0.02])
+rng = np.random.default_rng(1)
+
+def measure(angle_deg, pol):                           # 0.2 % measurement noise
+    g = ft.stack_rta_and_grads(lam, t0 * (1 + xt), (n0 + dn)[:, None] * S, 1.0,
+                               1.46, np.deg2rad(angle_deg), pol)
+    return ft.Measurement(np.deg2rad(angle_deg), pol, "T",
+                          np.clip(g["T"] + rng.normal(0, 0.002, lam.size), 0, 1), 0.002)
+
+try:
+    ft.errors_from_spectra(lam, [measure(0, "s")], t0, n0, S, fit_index=True,
+                           n_sub=1.46, n_starts=4)
+except ValueError as err:
+    print("one normal spectrum -> refused:", str(err)[:60], "...")
+
+ms = [measure(0, "s")] + [measure(a, p) for a in (45, 60) for p in "sp"]
+r = ft.errors_from_spectra(lam, ms, t0, n0, S, fit_index=True, n_sub=1.46, n_boot=30)
+print("thickness error found:", np.round(r.dt_over_t, 4), "+/-", np.round(r.sigma_t, 4))
+print("thickness error true: ", xt)
+print("index error found:    ", np.round(r.dn, 4), "+/-", np.round(r.sigma_n, 4))
+print("index error true:     ", dn)
+print("bootstrap spread of the index errors:", np.round(r.boot_sigma_n, 4))
+```
+
+```
+one normal spectrum -> refused: non-unique recovery: distinct error vectors reproduce the me ...
+thickness error found: [ 0.0243 -0.0179  0.0179  0.0088 -0.0224] +/- [0.0037 0.003  0.0043 0.0029 0.0024]
+thickness error true:  [ 0.03  -0.02   0.015  0.01  -0.025]
+index error found:     [ 0.0239 -0.012   0.0077 -0.0025 -0.0223] +/- [0.0025 0.0022 0.0018 0.0018 0.0021]
+index error true:      [ 0.02  -0.015  0.01   0.    -0.02 ]
+bootstrap spread of the index errors: [0.0022 0.002  0.0015 0.0015 0.0018]
+```
+
+From one normal-incidence spectrum, thickness and index errors
+cannot be told apart (here two different error vectors fit equally
+well, and the function refuses). Spectra at 45 and 60 degrees in both
+polarizations add enough independent information: every recovered
+error lies within a few error bars of the truth. The function keeps
+all the refusals of `errors_from_spectrum` and decides from the data,
+case by case, whether the indices are determined. `n_boot` repeats the
+fit on synthetic noisy copies (a parametric bootstrap) as a check on
+the linear error bars.
+
+### 15. Correcting a run halfway
+
+```python
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.45, 0.65, 61)
+S = ft.dispersion_shape(lam, 0.55)
+w, c = ft.notch_weights(lam, 0.532, 0.012, 0.02)
+box = ft.DesignBox(10, 0.03, 0.15, 1.7, 2.3)
+t, n, J, _ = ft.inverse_design(lam, S, w, c, box, n_probe=120, n_seed=3,
+                               n_iter=40, n_sub=1.46)
+merit = lambda tt, nn: float(ft.merit(ft.transmittance(lam, tt, nn[:, None] * S,
+                                                       1.0, 1.46), w, c))
+rng = np.random.default_rng(7)
+m = 5            # the 5 layers on the substrate side are deposited and measured
+done, rest = slice(10 - m, 10), slice(0, 10 - m)
+gains = []
+for run in range(10):
+    tf, nf = ft.PAPER_PROCESS.corrupt(t, n, rng)  # what the machine does
+    fix = ft.reoptimize_remaining(lam, t, n, S, w, c, m, tf[done], nf[done], box,
+                                  n_sub=1.46)
+    # the remaining layers suffer the same errors, corrected or not
+    t2, n2 = fix["t"].copy(), fix["n"].copy()
+    t2[rest] *= tf[rest] / t[rest]
+    n2[rest] += nf[rest] - n[rest]
+    gains.append(merit(t2, n2) - merit(tf, nf))
+print("merit gained by correcting after 5 of 10 layers:", np.round(gains, 3))
+print(f"mean gain {np.mean(gains):.3f}")
+```
+
+```
+merit gained by correcting after 5 of 10 layers: [ 0.016  0.028  0.021  0.008  0.015  0.014  0.016  0.017  0.004 -0.001]
+mean gain 0.014
+```
+
+After the 5 layers next to the substrate (grown first) are deposited
+and measured, `reoptimize_remaining` re-designs the other 5 to make
+up for the errors already made. Each corrected run is compared with
+the same run left alone, with the remaining layers given the same
+errors: 9 of the 10 runs gain, one loses slightly, and the mean gain
+is 0.014. Layer 0 of a fabtwin stack is the one next to the incidence
+medium; `first="incidence"` treats layer 0 as grown first instead.
+With `twin=` the remaining layers are instead made robust to what the
+machine will still do, after conditioning the twin on the errors
+already measured (`GaussianTwin.conditional`). This is a simple
+re-optimization rule, not the paper's Stage 3.
+
+### 16. A better-spread calibration design
+
+```python
+import fabtwin as ft
+
+box = ft.DesignBox(3, 0.03, 0.15, 1.7, 2.3)
+greedy = ft.design_recipes(box, 6)
+refined = ft.design_recipes(box, 6, refine=True)
+print(f"smallest distance between recipes: greedy {ft.maximin_distance(box, *greedy):.3f}, "
+      f"refined {ft.maximin_distance(box, *refined):.3f}")
+```
+
+```
+smallest distance between recipes: greedy 1.019, refined 1.283
+```
+
+`refine=True` improves the greedy recipe choice by swapping recipes
+for candidates while that increases the smallest distance between any
+two recipes. It is never worse than the greedy choice, and here it is
+26 % better, but it is still a local search, not a proven optimum.
+
 ## What is in the package
 
 Every name below is exported from `fabtwin` unless marked
@@ -620,6 +976,27 @@ example) gives the inputs, units and conventions.
   two or more materials). Normal incidence and non-absorbing layers
   only.
 
+**Gradients at any angle, with absorption, and other merits**
+(`fabtwin.gradients`, `fabtwin.merits`; new in 0.7.0)
+
+- `stack_rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad,
+  pol)` -- `R`, `T`, `A` and their derivatives with respect to every
+  thickness, index real part and extinction `k`; `pol` is `"s"`, `"p"`
+  or `"u"` (unpolarized). `layer_indices(n0, shape, kext)` builds
+  `n0 * S + i k`.
+- Merits: `LinearMerit(weights, const, quantity)` (`w . X + const` for
+  `X` = `R`, `T` or `A`), `TargetMerit` (closeness to a target
+  spectrum), `SpecMarginMerit` (a smooth pass/fail margin; `J > 0`
+  guarantees the specification), `FunctionMerit` (your own).
+- `OpticalModel(merit, conditions, kext)` -- the merit, the measuring
+  conditions (a list of `(angle, polarization)`) and the fixed
+  absorption of the layers. `inverse_design`, `adam_ascent`,
+  `random_search`, `robustify`, `cvar_objective_and_grad`,
+  `evaluate_under_process`, `induced_merits`, `twin_fidelity_report`
+  and `reoptimize_remaining` take it as `model=` (with `w, const`
+  passed as `None`). `model_spectra` and `model_merit_and_grad` give
+  the spectra and the merit with its gradient.
+
 **Fabrication process and twins** (`fabtwin.process`, `fabtwin.twins`)
 
 - `DepositionProcess` -- a simulated deposition machine with six error
@@ -640,7 +1017,9 @@ example) gives the inputs, units and conventions.
   (`mu + L z`: turns standard normal random numbers `z` into error
   vectors, where `mu` is the mean and `L L^T` the covariance; this
   lets `robustify` hold the random numbers fixed while it takes
-  derivatives).
+  derivatives); `conditional(observed, values)` (new in 0.7.0) -- the
+  twin given some error components already measured, from the exact
+  Gaussian conditional distribution.
 
 **Risk and yield** (`fabtwin.risk`)
 
@@ -665,9 +1044,14 @@ example) gives the inputs, units and conventions.
   `n_probe + 2 * n_seed * n_iter`); `adam_ascent` -- the ascent from
   one start; `random_search` -- the equal-budget random baseline.
 - `robustify` -- CVaR (or mean minus `beta` standard deviations)
-  ascent through a `GaussianTwin` and the exact optics;
-  `cvar_objective_and_grad` -- that objective and its exact gradient
-  for a fixed batch of random draws. Fabricated thicknesses are
+  ascent through a `GaussianTwin` (or a `TwinEnsemble`) and the exact
+  optics; `estimator="sort"` (default, the paper's) or `"ru"`
+  (Rockafellar-Uryasev: unbiased gradient of an objective whose
+  maximum over the threshold is the CVaR; new in 0.7.0);
+  `cvar_objective_and_grad` and `ru_objective_and_grad` -- the two
+  objectives and their exact gradients for a fixed batch of random
+  draws; `TwinEnsemble(x, n_members)` -- Gaussian twins refitted on
+  bootstrap resamples of the runs. Fabricated thicknesses are
   clipped to `[0.5 t_lo, 2 t_hi]` and indices to
   `[n_lo - 0.2, n_hi + 0.2]` inside the objective.
 
@@ -686,21 +1070,39 @@ example) gives the inputs, units and conventions.
 - `twin_fidelity_report` -- `moment_errors` on the error vectors,
   plus the `distribution_distances` of the induced merits, averaged
   over a set of designs.
+- New in 0.7.0: `energy_distance`; `drift_test(x_old, x_new)` -- a
+  permutation test of "same machine"; `novelty_pvalues(x_train,
+  x_calib, x_new)` -- conformal p-values for "this run is like the
+  logged ones" (example 13).
 
 **Reverse engineering** (`fabtwin.reverse`)
 
 - `errors_from_spectrum` -> `SpectrumRecovery` (fields `dt_over_t`,
   `t_um`, `sigma`, `chi2`, `dof`, `condition_number`, `n_converged`)
   (example 5).
+- `errors_from_spectra(lam, measurements, ...)` -> `JointRecovery`
+  (new in 0.7.0): several `Measurement(angle, pol, "T" or "R",
+  values, sigma)` at once, thickness errors and, with `fit_index`,
+  index errors, optionally a parametric bootstrap (example 14).
 
 **Planning** (`fabtwin.lab`)
 
-- `design_recipes`, `runs_for_twin_mean` (example 6).
+- `design_recipes` (with `refine=True`, new in 0.7.0),
+  `maximin_distance`, `runs_for_twin_mean` (examples 6 and 16).
+
+**Correcting a run** (`fabtwin.correct`, new in 0.7.0)
+
+- `reoptimize_remaining` -- re-design the layers not yet deposited,
+  given the measured ones; `first="substrate"` (default) or
+  `"incidence"` says which end was grown first (example 15).
 
 **Conformal prediction** (`fabtwin.conformal`)
 
 - `conformal_quantile`, `conformal_interval`,
-  `conformal_coverage_exact` (example 7).
+  `conformal_coverage_exact` (example 7); new in 0.7.0:
+  `mondrian_quantiles` (one guarantee per group, for example per
+  recipe) and `AdaptiveConformal` (for a drifting process; example
+  13).
 
 **Learned twin** (`fabtwin.twin_jax`, needs `[twin]`)
 
@@ -764,16 +1166,31 @@ example) gives the inputs, units and conventions.
   finite; `weights_from_reflectance` gets weights that are not 1-D;
   `pol` is not `"s"` or `"p"`;
 - the `twin_jax` functions are called without JAX installed
-  (`ImportError` naming the extra).
+  (`ImportError` naming the extra);
+- new in 0.7.0: `stack_rta_and_grads` gets an absorbing incidence
+  medium, an angle outside [0, 90) degrees, a polarization other than
+  `"s"`, `"p"`, `"u"`, or a layer exactly at its critical angle (no
+  derivative there); an `OpticalModel` gets a bad condition; a merit
+  gets an empty band, negative weights or a non-positive sharpness;
+  a design or robust function gets neither weights nor `model=`;
+  `robustify` gets an unknown estimator or `"ru"` with mean-variance;
+  `TwinEnsemble` gets fewer than 4 runs or 1 member;
+  `errors_from_spectra` gets no measurements, a quantity other than
+  `T` or `R`, fewer values than unknowns, an ill-conditioned or
+  non-unique fit; `drift_test` gets fewer than 2 runs per group or
+  fewer than 19 permutations; `mondrian_quantiles` has a group too
+  small for the level; `reoptimize_remaining` gets no deposited or no
+  remaining layers; `GaussianTwin.conditional` gets repeated or
+  invalid indices.
 
 ## How the results are checked
 
-78 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+117 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
-check). Without JAX, 8 of the tests do not run (pytest reports the 6
-in `test_twin_jax.py` as one skipped module, plus 2 others). Numerical
+check). Without JAX, 9 of the tests do not run (pytest reports the 6
+in `test_twin_jax.py` as one skipped module, plus 3 others). Numerical
 checks compare against a closed-form answer, an independent code, or
 a second calculation; none compares against a number stored from an
 earlier run. Checks of random processes use fixed seeds and
@@ -872,6 +1289,92 @@ statistical tolerances. The main checks:
   standard errors of the exact value, and on the reference process
   400 fresh runs reach at least `1 - alpha` minus 4 standard errors.
 
+**Gradients at any angle, with absorption; other merits (0.7.0)**
+
+- The forward optics agree with the independent `tmm` package to
+  1e-12 on 200 random stacks: absorbing and lossless layers, s and p,
+  angles up to 86 degrees, incidence media of index 1, 1.52 and 2, lossless and
+  absorbing substrates, including cases beyond the critical angle
+  (0.6.1 failed some of these; see Corrections).
+- `stack_rta_and_grads` equals the original adjoint at normal
+  incidence to 1e-12 (relative); all its derivatives (thickness, `n`,
+  `k`; for `R`, `T` and `A`) match central finite differences of the
+  forward optics on 40 random stacks with absorption, oblique angles,
+  s, p and unpolarized light, to a relative 1e-7 (plus an absolute
+  1e-8 for round-off); for the `k` of a non-absorbing layer the
+  difference can only be one-sided (k cannot go negative) and the
+  tolerance is 1e-4. The derivatives of `T` for one absorbing
+  three-layer stack at 40 degrees (s) equal automatic differentiation
+  of a separate JAX implementation to a relative 1e-10.
+- The gradients of every merit (`LinearMerit` on `R` and on `A`,
+  `TargetMerit`, `SpecMarginMerit`, `FunctionMerit`) through a
+  three-angle absorbing model match finite differences to a relative
+  1e-6; `LinearMerit` on `T` at normal incidence equals the original
+  path: the merit to 1e-13, its gradient to a relative 1e-11.
+- On 3000 random spectra `SpecMarginMerit` never exceeds the true
+  margins, and every spectrum with `J > 0` passes `pass_fail`.
+- A 45-degree, unpolarized, absorbing bandpass design by
+  `inverse_design(model=)` is not beaten by random search with the
+  same number of merit evaluations.
+
+**Robust design (0.7.0)**
+
+- `ru_objective_and_grad` equals its formula (to 1e-14) and its
+  gradient matches finite differences (relative 1e-5); when `alpha K`
+  is a whole number, its maximum over the threshold is the CVaR of the
+  batch (1e-13); otherwise the two differ slightly, because `cvar`
+  averages the `ceil(alpha K)` worst values.
+- Averaging 20000 minibatch gradients with `K = 20` from one pool of
+  6000 draws: the Rockafellar-Uryasev gradient agrees with the pool's
+  own CVaR gradient (every component within 4 standard errors), while
+  the sorting estimator is off by more than 6 standard errors (the
+  bias the paper describes).
+- `robustify(estimator="ru")`, with a Gaussian twin and with a
+  `TwinEnsemble`, raises the CVaR measured on 400 fresh runs of the
+  reference process; the default path and the model path give the
+  same objective and gradient (1e-10).
+
+**Drift, novelty, conformal (0.7.0)**
+
+- `energy_distance` equals a direct pairwise computation (1e-10).
+  `drift_test` at the 5 % level rejects at most 15 % of 40 same-machine
+  comparisons, and detects a thickness-bias change from 2 % to 4 %
+  with 30 runs each (p <= 0.01).
+- `novelty_pvalues` on 300 runs of an unchanged process, with one
+  seeded calibration set, satisfy `P(p <= u) <= u` within 3 binomial
+  standard errors for u = 0.05, 0.1, 0.2 (the guarantee is on average
+  over calibration sets; one set adds its own spread), and
+  runs with an unseen 20 % layer error get the smallest possible
+  p-value.
+- `mondrian_quantiles` covers each of two groups at the exact rate
+  (1500 trials, within 4 standard errors); `AdaptiveConformal` meets
+  its long-run bound at every one of 3000 steps of a drifting sequence
+  and ends within 0.02 of the target, where a fixed band misses more
+  than 30 % of runs.
+
+**Joint recovery, correction, calibration design (0.7.0)**
+
+- `errors_from_spectra` recovers thickness and index errors from
+  noise-free spectra at 0, 45 and 60 degrees to 1e-6; it refuses one
+  normal-incidence spectrum, and also normal-incidence `T` plus `R`
+  (which carry the same information for a lossless stack); with 0.2 %
+  noise every error is within 4 error bars, chi2/dof is between 0.8
+  and 1.25, and the bootstrap spread is within a factor 2 of the
+  linear error bars. With thicknesses only it reproduces
+  `errors_from_spectrum` (1e-8).
+- `GaussianTwin.conditional` equals the closed-form conditional
+  (1e-12); its measured components stay fixed; a regression over
+  200000 joint draws recovers the same coefficients (within 0.02).
+- `reoptimize_remaining` without a twin never lowers the nominal
+  merit given the measured layers; with or without one it never
+  changes the measured layers, in both deposition orders; on the
+  reference process the corrected runs end up better on average than
+  the same runs uncorrected, with and without a twin. The conditioned
+  twin reproduces the measured layers to 1e-15.
+- `design_recipes(refine=True)` is never worse than the greedy design
+  and is more than 20 % better in the tested three-layer case; the
+  default is unchanged.
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -881,7 +1384,24 @@ works, not how good a trained twin is.
 
 ## Corrections in earlier versions
 
-**0.6.1 (this release) closes a gap in the lossless check of the
+**0.7.0 (this release) fixes a wrong reflectance beyond the critical
+angle.** Past the critical angle of a lossless medium (light arriving
+from glass at a steep angle, for example) the wave in that medium
+decays, and of the two square roots for `n cos(theta)` the solver must
+take the decaying one. Versions up to 0.6.1 took the other one. This
+matters only for a lossless substrate beyond its critical angle (for
+a layer inside the stack either root gives the same result, and the
+incidence medium never is beyond it). There `T = 0` either way; with
+all layers lossless `R = 1` either way too, but when the stack
+absorbs, `R` came out wrong: for glass (1.52) -> 100 nm of index 1.38 -> 80 nm of
+2.1 + 0.05i -> air at 0.8 rad (s), 0.6.1 gave `R = 0.938`, the
+independent `tmm` package and 0.7.0 give `0.888`. Below the critical
+angle of every medium the results are unchanged, bit for bit (checked
+on 286 random cases). The tests compared with `tmm` only at normal
+incidence before; they now cover oblique, absorbing and
+beyond-critical cases.
+
+**0.6.1 closed a gap in the lossless check of the
 gradient functions.** `transmittance_and_grads` and `merit_and_grad`
 refused complex thicknesses and indices, but a complex dispersion
 shape, a complex substrate index array, or a NumPy complex scalar
@@ -910,36 +1430,53 @@ use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
 
-- The gradient path (adjoint, design, robust design, spectrum
-  recovery) covers normal incidence and non-absorbing layers, the
-  regime of the FabGAN-ID loop. Oblique and absorbing stacks have
-  forward optics only; their gradients are not provided.
-- Merits must be linear in `T` (`w . T + const`).
-- `robustify` estimates the CVaR from `K` samples drawn fresh at each
-  step. Following the paper, this gradient estimate is biased for
-  finite `K` (the bias shrinks as `K` grows), and the result depends on
-  the twin being a fair model of the machine.
-- A held-out comparison (`twin_fidelity_report`) shows how well a twin
-  matches the runs you recorded. It cannot vouch for error patterns
-  the machine has never shown, and a twin needs retraining as the
-  machine drifts (the paper's own caveat). The paper's yield gains
-  were obtained with its simulated process.
-- Spectrum recovery fits thickness errors only; indices are held at
-  the recipe. Recovering thickness and index together from one
-  normal-incidence spectrum is the classically unreliable problem
-  (Tikhonravov and Trubetskov, Appl. Opt. 51, 245 (2012); Amotchkina
-  et al., Appl. Opt. 51, 5543 (2012)). The reported uncertainties are
-  a linear estimate at the best fit; example 5 shows how large they
-  can be.
-- The conformal guarantee is on average over runs, not per recipe,
-  and needs runs from an unchanged process.
-- `design_recipes` is a greedy rule of thumb, not an optimal design.
+What 0.7.0 changed about the limits of 0.6.1, and what is left:
+
+- **Gradients.** The whole gradient path (design, robust design,
+  spectrum recovery, correction) now works at any angle, for s, p and
+  unpolarized light, with absorbing layers, through `model=`. The
+  learned JAX twin's `robustify_gan` still uses its own
+  normal-incidence, non-absorbing solver and linear merit; use a
+  `GaussianTwin` or `TwinEnsemble` with `robustify(model=...)` for the
+  other cases. An absorbing incidence medium is refused.
+- **Merits.** Any differentiable function of `R`, `T` and `A` at one or
+  several angles works (`OpticalModel`). `SpecMarginMerit` is a smooth
+  stand-in for the pass/fail specification that never overstates it.
+  The design is still found by local gradient ascent from random
+  probes; nothing guarantees the global best.
+- **CVaR estimate.** `estimator="ru"` has an unbiased gradient at any
+  `K` (for the Rockafellar-Uryasev objective, whose maximum over the
+  threshold is the CVaR); the default stays the paper's estimator. `TwinEnsemble` covers
+  the uncertainty of a twin fitted to few runs. Neither can make a
+  twin a fair model of a machine it has not observed.
+- **Twin fidelity and drift.** `drift_test` detects a change in the
+  machine, `novelty_pvalues` flags runs unlike the logged ones, and
+  `reoptimize_remaining` corrects a run in progress. They cannot
+  predict error patterns the machine has never shown, and a detected
+  drift still means refitting the twin. The paper's yield gains were
+  obtained with its simulated process, as were this package's
+  examples.
+- **Spectrum recovery.** Thickness and index errors can now be fitted
+  together from several measurements (angles, polarizations, `R` and
+  `T`); whether they are determined is decided case by case by the
+  refusals, and one normal-incidence spectrum is still not enough.
+  Error bars are still local (linear or bootstrap around the best
+  fit); the dispersion shape of each layer is held at the recipe.
+- **Conformal guarantees.** `mondrian_quantiles` gives a guarantee per
+  group, but only for groups with their own held-out runs; a guarantee
+  for every recipe at once, without such runs, is impossible for any
+  method of this kind (Barber et al., Information and Inference 10,
+  455 (2021)). `AdaptiveConformal` keeps a long-run miss rate under
+  drift; it says nothing about a single run.
+- **Calibration design.** `refine=True` improves the greedy design by
+  local exchanges; it is still not a proven optimum.
 - Not included, by choice: specification-conditioned correction
   policies (the paper's Stage 3, which the paper treats as
-  exploratory); neural forward surrogates (the paper's protocol study
-  found the exact differentiable solver better in this setting:
-  faster, exact, with exact gradients); and the paper's benchmark data
-  (300 designs / 48,300 samples / 400 traces), which stays with the
+  exploratory; `reoptimize_remaining` is a simpler, well-defined
+  rule); neural forward surrogates (the paper's protocol study found
+  the exact differentiable solver better in this setting: faster,
+  exact, with exact gradients); and the paper's benchmark data (300
+  designs / 48,300 samples / 400 traces), which stays with the
   companion repository and its Zenodo archive -- `DepositionProcess`
   generates equivalent data instead.
 - The programming interface may change before version 1.0.
