@@ -25,16 +25,25 @@ from .twins import GaussianTwin, apply_errors, errors_from_traces
 from .risk import (cvar, evaluate_under_process, pass_fail,
                    tail_statistics, yield_fraction)
 from .design import DesignBox, adam_ascent, inverse_design, random_search
-from .robust import cvar_objective_and_grad, robustify
+from .robust import (TwinEnsemble, cvar_objective_and_grad,
+                     robustify, ru_objective_and_grad)
 from .data import load_traces_csv, save_traces_csv, validate_traces
-from .reverse import SpectrumRecovery, errors_from_spectrum
-from .lab import design_recipes, runs_for_twin_mean
-from .conformal import (conformal_coverage_exact, conformal_interval,
-                        conformal_quantile)
-from .fidelity import (distribution_distances, induced_merits,
-                       moment_errors, twin_fidelity_report)
+from .reverse import (JointRecovery, Measurement, SpectrumRecovery,
+                      errors_from_spectra, errors_from_spectrum)
+from .lab import design_recipes, maximin_distance, runs_for_twin_mean
+from .conformal import (AdaptiveConformal, conformal_coverage_exact,
+                        conformal_interval, conformal_quantile,
+                        mondrian_quantiles)
+from .fidelity import (distribution_distances, drift_test,
+                       energy_distance, induced_merits, moment_errors,
+                       novelty_pvalues, twin_fidelity_report)
+from .gradients import layer_indices, stack_rta_and_grads
+from .merits import (FunctionMerit, LinearMerit, OpticalModel,
+                     SpecMarginMerit, TargetMerit, model_merit_and_grad,
+                     model_spectra)
+from .correct import reoptimize_remaining
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",
@@ -55,4 +64,13 @@ __all__ = [
     "design_recipes", "runs_for_twin_mean",
     "conformal_quantile", "conformal_interval",
     "conformal_coverage_exact",
+    # new in 0.7.0
+    "stack_rta_and_grads", "layer_indices",
+    "LinearMerit", "TargetMerit", "SpecMarginMerit", "FunctionMerit",
+    "OpticalModel", "model_spectra", "model_merit_and_grad",
+    "ru_objective_and_grad", "TwinEnsemble",
+    "Measurement", "JointRecovery", "errors_from_spectra",
+    "energy_distance", "drift_test", "novelty_pvalues",
+    "mondrian_quantiles", "AdaptiveConformal",
+    "maximin_distance", "reoptimize_remaining",
 ]

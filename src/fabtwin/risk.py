@@ -61,17 +61,26 @@ def yield_fraction(T, stop_mask, pass_mask, leak_max=0.09, pass_min=0.90):
 
 
 def evaluate_under_process(sampler, t_um, n0, lam_um, shape, weights,
-                           const, K, n_inc=1.0, n_sub=1.0, alpha=0.05):
+                           const, K, n_inc=1.0, n_sub=1.0, alpha=0.05,
+                           model=None):
     """Score a design by K fresh draws from `sampler(t, n, K)` ->
     (t_tilde (K,N), n_tilde (K,N)) -- the reference process, a twin,
     or anything else with that signature. Returns tail_statistics of
-    the merit plus the merit samples."""
+    the merit plus the merit samples. model= takes a
+    `fabtwin.OpticalModel` (any angle, absorbing layers, nonlinear
+    merit; weights and const are then ignored)."""
     tt, nt = sampler(t_um, n0, K)
     S = np.asarray(shape, dtype=float)
     if S.ndim == 1:
         S = np.broadcast_to(S[None, :], (len(t_um), S.size))
     J = np.empty(K)
     for k in range(K):
+        if model is not None:
+            from .merits import model_spectra
+            R_, T_, A_ = model_spectra(model, lam_um, tt[k], nt[k], S,
+                                       n_inc, n_sub)
+            J[k] = model.merit(R_, T_, A_)[0]
+            continue
         nlay = np.asarray(nt[k])[:, None] * S
         T = tmm.transmittance(lam_um, tt[k], nlay, n_inc, n_sub)
         J[k] = tmm.merit(T, weights, const)

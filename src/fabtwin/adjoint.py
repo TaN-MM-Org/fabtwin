@@ -22,9 +22,10 @@ variable-index platforms and classic multi-material stacks use the
 same adjoint) and phase delta_i = 2 pi n_i t_i / lam, so the chain to
 the design parameters (t_i, n0_i) is elementary. Scope, stated
 plainly: normal incidence and real (lossless) layer indices -- the
-regime of the FabGAN-ID loop; the oblique and absorbing *forward*
-solver lives in `fabtwin.tmm`, and its gradients are deliberately not
-faked here.
+regime of the FabGAN-ID loop. Oblique incidence, absorbing layers,
+R and A, and nonlinear merits have their own exact gradients in
+`fabtwin.gradients` and `fabtwin.merits` (new in 0.7.0), which the
+tests hold equal to this module where both apply.
 
 Anchors asserted in the tests rather than stated: agreement with
 central finite differences to a median relative error near 1e-10 (the

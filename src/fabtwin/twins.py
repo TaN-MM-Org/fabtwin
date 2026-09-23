@@ -78,3 +78,52 @@ class GaussianTwin:
     def sample(self, rng, t_um, n0, K):
         """K fabricated realizations of a recipe."""
         return apply_errors(t_um, n0, self.sample_errors(rng, K))
+
+    def conditional(self, observed, values):
+        """The twin given some error components already measured (new in
+        0.7.0) -- for example the layers deposited so far, measured by
+        an in-situ monitor.
+
+        observed : indices (into the 2N error vector) that are known;
+        values : their measured values. Returns a `GaussianTwin` of the
+        same dimension whose observed components are fixed at the
+        measured values and whose other components follow the exact
+        Gaussian conditional distribution
+
+            mu_u + C_uo C_oo^-1 (x_o - mu_o),
+            C_uu - C_uo C_oo^-1 C_ou,
+
+        so errors correlated with the measured ones (the AR(1) thickness
+        noise of a real tool, for one) are predicted, not ignored.
+        """
+        obs = np.asarray(observed, dtype=int).ravel()
+        val = np.asarray(values, dtype=float).ravel()
+        if obs.size != val.size or obs.size == 0 or \
+                np.any(obs < 0) or np.any(obs >= self.dim) or \
+                np.unique(obs).size != obs.size:
+            raise ValueError("observed must be distinct valid indices, "
+                             "one value each")
+        un = np.setdiff1d(np.arange(self.dim), obs)
+        C = self.cov
+        Coo = C[np.ix_(obs, obs)]
+        Cuo = C[np.ix_(un, obs)]
+        K = np.linalg.solve(Coo, Cuo.T).T
+        mu = self.mu.copy()
+        mu[obs] = val
+        mu[un] = self.mu[un] + K @ (val - self.mu[obs])
+        cov = np.zeros_like(C)
+        if un.size:
+            cov[np.ix_(un, un)] = C[np.ix_(un, un)] - K @ Cuo.T
+        out = GaussianTwin.__new__(GaussianTwin)
+        out.dim = self.dim
+        out.mu = mu
+        out.cov = 0.5 * (cov + cov.T)
+        out.diagonal = False
+        # square-root factor with exact zeros on the observed components
+        L = np.zeros_like(C)
+        if un.size:
+            Cu = out.cov[np.ix_(un, un)]
+            w, V = np.linalg.eigh(Cu)
+            L[np.ix_(un, un)] = V * np.sqrt(np.clip(w, 0.0, None))
+        out.L = L
+        return out

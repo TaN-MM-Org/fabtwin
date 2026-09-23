@@ -35,7 +35,8 @@ from __future__ import annotations
 import numpy as np
 
 __all__ = ["conformal_quantile", "conformal_interval",
-           "conformal_coverage_exact"]
+           "conformal_coverage_exact", "mondrian_quantiles",
+           "AdaptiveConformal"]
 
 
 def conformal_quantile(scores, alpha=0.1):
@@ -88,3 +89,118 @@ def conformal_coverage_exact(n, alpha):
         raise ValueError("level not certifiable at this n (see "
                          "conformal_quantile)")
     return k / (n + 1.0)
+
+
+# ----------------------------------------------------------------------
+# Per-group guarantees and drifting processes (new in 0.7.0)
+
+
+def mondrian_quantiles(scores, groups, alpha=0.1):
+    """Group-conditional ("Mondrian") split conformal: one quantile per
+    group, from that group's held-out scores alone.
+
+    Within each group the guarantee of `conformal_quantile` holds for
+    new runs of THAT group (Vovk, Gammerman and Shafer (2005), Mondrian
+    conformal predictors) -- for example per recipe, when each recipe
+    has its own held-out runs. A group with too few runs for the level
+    is refused (the message names it). Conditioning on every possible
+    recipe at once, without runs of each, is impossible for any
+    method of this kind: R. F. Barber, E. J. Candes, A. Ramdas and
+    R. J. Tibshirani, Information and Inference 10, 455 (2021).
+
+    scores : (n,) held-out scores; groups : (n,) hashable labels.
+    Returns dict label -> q.
+    """
+    s = np.asarray(scores, dtype=float).ravel()
+    labels = list(groups)
+    if len(labels) != s.size:
+        raise ValueError("scores and groups must have the same length")
+    idx = {}
+    for i, lab in enumerate(labels):
+        key = lab.item() if hasattr(lab, "item") else lab
+        idx.setdefault(key, []).append(i)
+    out = {}
+    for key, ii in idx.items():
+        try:
+            out[key] = conformal_quantile(s[ii], alpha)
+        except ValueError as exc:
+            raise ValueError(f"group {key!r}: {exc}") from None
+    return out
+
+
+class AdaptiveConformal:
+    """Adaptive conformal inference for a process that drifts (I. Gibbs
+    and E. Candes, "Adaptive Conformal Inference Under Distribution
+    Shift", NeurIPS 2021).
+
+    At each new run the interval half-width is the (1 - alpha_t)
+    quantile of the most recent `window` scores (infinite when
+    alpha_t <= 0, empty when alpha_t >= 1). After the run's score s_t
+    is seen, err_t = 1{s_t > half-width} and
+
+        alpha_{t+1} = alpha_t + gamma (alpha - err_t).
+
+    Whatever the sequence of scores -- drifting, jumping, adversarial
+    -- alpha_t stays in [-gamma, 1 + gamma], and summing the updates
+    gives, for every T,
+
+        | (1/T) sum_t err_t - alpha | <= (max(alpha_1, 1 - alpha_1)
+                                          + gamma) / (gamma T),
+
+    a long-run guarantee with no exchangeability assumption (the tests
+    check this deterministic bound on a drifting sequence). It is a
+    frequency statement over time, not a probability for any single
+    run.
+    """
+
+    def __init__(self, scores_init, alpha=0.1, gamma=0.005, window=200):
+        s = np.asarray(scores_init, dtype=float).ravel()
+        if s.size < 1 or not np.all(np.isfinite(s)) or np.any(s < 0):
+            raise ValueError("initial scores must be finite and >= 0")
+        if not (0.0 < alpha < 1.0) or not (gamma > 0.0):
+            raise ValueError("need alpha in (0, 1) and gamma > 0")
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        self.window = int(window)
+        if self.window < 1:
+            raise ValueError("window must be >= 1")
+        self.alpha_t = float(alpha)
+        self.alpha_1 = float(alpha)
+        self.scores = list(s[-self.window:])
+        self.errors = []
+
+    def half_width(self):
+        """Current interval half-width q_t (inf or -inf at the ends)."""
+        a = self.alpha_t
+        if a <= 0.0:
+            return np.inf
+        if a >= 1.0:
+            return -np.inf
+        s = np.sort(self.scores)
+        n = s.size
+        k = int(np.ceil((n + 1) * (1.0 - a)))
+        return float(s[k - 1]) if k <= n else np.inf
+
+    def update(self, score):
+        """Record one new run's score; returns whether it was missed."""
+        sc = float(score)
+        if not (np.isfinite(sc) and sc >= 0):
+            raise ValueError("score must be finite and >= 0")
+        err = float(sc > self.half_width())
+        self.errors.append(err)
+        self.alpha_t += self.gamma * (self.alpha - err)
+        self.scores.append(sc)
+        if len(self.scores) > self.window:
+            self.scores.pop(0)
+        return bool(err)
+
+    def miss_rate(self):
+        return float(np.mean(self.errors)) if self.errors else float("nan")
+
+    def bound(self):
+        """The guaranteed |miss rate - alpha| after the runs so far."""
+        T = len(self.errors)
+        if T == 0:
+            return float("inf")
+        return (max(self.alpha_1, 1 - self.alpha_1) + self.gamma) \
+            / (self.gamma * T)

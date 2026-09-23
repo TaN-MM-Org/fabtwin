@@ -34,11 +34,11 @@ import numpy as np
 
 from .design import DesignBox
 
-__all__ = ["design_recipes", "runs_for_twin_mean"]
+__all__ = ["design_recipes", "runs_for_twin_mean", "maximin_distance"]
 
 
 def design_recipes(box: DesignBox, n_recipes, n_candidates=512,
-                   seed=0):
+                   seed=0, refine=False, max_sweeps=50):
     """Choose well-spread calibration recipes inside the design box.
 
     Draws a candidate pool from the box, then greedily builds the
@@ -52,6 +52,15 @@ def design_recipes(box: DesignBox, n_recipes, n_candidates=512,
     Deterministic for a given seed. Returns (recipes_t, recipes_n),
     each (n_recipes, N) -- exactly the shape
     `DepositionProcess.trace_dataset` takes.
+
+    refine=True (new in 0.7.0) then improves the greedy design by
+    exchanges: a chosen recipe is swapped for a pool candidate whenever
+    that strictly increases the design's smallest pairwise distance
+    (ties broken by fewer pairs at that distance), sweeping until no
+    swap helps or `max_sweeps` is reached. The result is never worse
+    than the greedy design on this criterion (asserted in the tests);
+    it is still a local search over the candidate pool, not a proof of
+    the best possible design. `maximin_distance` reports the criterion.
     """
     n_recipes = int(n_recipes)
     n_candidates = int(n_candidates)
@@ -84,7 +93,68 @@ def design_recipes(box: DesignBox, n_recipes, n_candidates=512,
         d_new = np.sqrt(np.sum((x - x[nxt]) ** 2, axis=1))
         mind = np.minimum(mind, d_new)
     idx = np.array(chosen)
+    if refine and n_recipes >= 2:
+        idx = _exchange(x, idx, int(max_sweeps))
     return t[idx].copy(), n[idx].copy()
+
+
+def _crit(D):
+    iu = np.triu_indices(D.shape[0], 1)
+    d = D[iu]
+    m = d.min()
+    return m, int(np.sum(d <= m * (1 + 1e-12)))
+
+
+def _exchange(x, idx, max_sweeps):
+    idx = list(idx)
+    for _ in range(max_sweeps):
+        improved = False
+        for pos in range(len(idx)):
+            sub = x[idx]
+            D = np.sqrt(((sub[:, None, :] - sub[None, :, :]) ** 2).sum(-1))
+            best = _crit(D)
+            others = [j for k, j in enumerate(idx) if k != pos]
+            # distances from every candidate to the other chosen points
+            dc = np.sqrt(((x[:, None, :] - x[others][None, :, :]) ** 2)
+                         .sum(-1)).min(axis=1)
+            for cand in np.argsort(dc)[::-1]:
+                if cand in idx:
+                    continue
+                if dc[cand] <= best[0] * (1 + 1e-12):
+                    break          # no remaining candidate can raise it
+                trial = idx.copy()
+                trial[pos] = int(cand)
+                sub = x[trial]
+                Dt = np.sqrt(((sub[:, None, :] - sub[None, :, :]) ** 2)
+                             .sum(-1))
+                c = _crit(Dt)
+                if c[0] > best[0] * (1 + 1e-12) or (
+                        abs(c[0] - best[0]) <= 1e-12 * best[0]
+                        and c[1] < best[1]):
+                    idx = trial
+                    improved = True
+                    break
+        if not improved:
+            break
+    return np.array(idx)
+
+
+def maximin_distance(box: DesignBox, recipes_t, recipes_n):
+    """Smallest pairwise distance between recipes, in the box-normalized
+    coordinates `design_recipes` uses (frozen axes carry no distance)."""
+    t = np.atleast_2d(np.asarray(recipes_t, float))
+    n = np.atleast_2d(np.asarray(recipes_n, float))
+    if t.shape[0] < 2:
+        raise ValueError("need at least two recipes")
+    lo = np.concatenate([np.broadcast_to(box.t_lo, (box.n_layers,)),
+                         np.broadcast_to(box.n_lo, (box.n_layers,))])
+    hi = np.concatenate([np.broadcast_to(box.t_hi, (box.n_layers,)),
+                         np.broadcast_to(box.n_hi, (box.n_layers,))])
+    span = hi - lo
+    live = span > 0
+    x = (np.hstack([t, n])[:, live] - lo[live]) / span[live]
+    D = np.sqrt(((x[:, None, :] - x[None, :, :]) ** 2).sum(-1))
+    return float(_crit(D)[0])
 
 
 def runs_for_twin_mean(target_se, pilot_x):

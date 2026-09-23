@@ -20,6 +20,7 @@ import dataclasses
 import numpy as np
 
 from . import adjoint, tmm
+from .merits import model_merit_and_grad
 
 __all__ = ["DesignBox", "inverse_design", "random_search", "adam_ascent"]
 
@@ -94,7 +95,21 @@ class DesignBox:
         return t, n
 
 
-def _merit_of(lam, t, n0, S, w, const, n_inc, n_sub):
+def _check_model(w, model):
+    if model is None and w is None:
+        raise ValueError("give linear weights (w, const) or an "
+                         "OpticalModel via model=")
+    if model is not None and w is not None:
+        raise ValueError("give either linear weights (w, const) or "
+                         "model=, not both (pass w=None, const=None "
+                         "with a model)")
+
+
+def _merit_of(lam, t, n0, S, w, const, n_inc, n_sub, model=None):
+    if model is not None:
+        from .merits import model_spectra
+        R, T, A = model_spectra(model, lam, t, n0, S, n_inc, n_sub)
+        return float(model.merit(R, T, A)[0])
     S = np.asarray(S)
     n0 = np.asarray(n0)
     nlay = n0[:, None] * (S[None, :] if S.ndim == 1 else S)
@@ -103,8 +118,14 @@ def _merit_of(lam, t, n0, S, w, const, n_inc, n_sub):
 
 
 def adam_ascent(lam, t, n0, S, w, const, box, n_iter=40, lr=4e-3,
-                n_inc=1.0, n_sub=1.0, beta1=0.9, beta2=0.999, eps=1e-8):
-    """Projected-Adam ascent from one seed; returns (t, n0, J, traj)."""
+                n_inc=1.0, n_sub=1.0, beta1=0.9, beta2=0.999, eps=1e-8,
+                model=None):
+    """Projected-Adam ascent from one seed; returns (t, n0, J, traj).
+
+    model : optional `fabtwin.OpticalModel` (any angle, absorbing
+    layers, nonlinear merit); w and const are then ignored (pass
+    None)."""
+    _check_model(w, model)
     t = np.asarray(t, float).copy()
     n0 = np.asarray(n0, float).copy()
     m = np.zeros(2 * box.n_layers)
@@ -112,8 +133,12 @@ def adam_ascent(lam, t, n0, S, w, const, box, n_iter=40, lr=4e-3,
     best = (t.copy(), n0.copy(), -np.inf)
     traj = []
     for it in range(1, n_iter + 1):
-        J, gd, gn = adjoint.merit_and_grad(lam, t, n0, S, w, const,
-                                           n_inc=n_inc, n_sub=n_sub)
+        if model is None:
+            J, gd, gn = adjoint.merit_and_grad(lam, t, n0, S, w, const,
+                                               n_inc=n_inc, n_sub=n_sub)
+        else:
+            J, gd, gn = model_merit_and_grad(model, lam, t, n0, S,
+                                             n_inc=n_inc, n_sub=n_sub)
         traj.append(J)
         if J > best[2]:
             best = (t.copy(), n0.copy(), J)
@@ -126,27 +151,31 @@ def adam_ascent(lam, t, n0, S, w, const, box, n_iter=40, lr=4e-3,
         t = t + step[:box.n_layers]
         n0 = n0 + step[box.n_layers:]
         t, n0 = box.clip(t, n0)
-    J = _merit_of(lam, t, n0, S, w, const, n_inc, n_sub)
+    J = _merit_of(lam, t, n0, S, w, const, n_inc, n_sub, model)
     if J > best[2]:
         best = (t, n0, J)
     return best[0], best[1], best[2], np.asarray(traj)
 
 
 def inverse_design(lam, S, w, const, box, n_probe=200, n_seed=4,
-                   n_iter=40, lr=4e-3, n_inc=1.0, n_sub=1.0, seed=0):
+                   n_iter=40, lr=4e-3, n_inc=1.0, n_sub=1.0, seed=0,
+                   model=None):
     """Probe-seeded adjoint engine. Query budget = n_probe
-    + 2 n_seed n_iter. Returns (t*, n*, J*, best-so-far trajectory)."""
+    + 2 n_seed n_iter. Returns (t*, n*, J*, best-so-far trajectory).
+    With model= (a `fabtwin.OpticalModel`) the merit, angles and
+    absorption come from the model and w, const are ignored."""
+    _check_model(w, model)
     rng = np.random.default_rng(seed)
     tp, npr = box.sample(rng, n_probe)
     Jp = np.array([_merit_of(lam, tp[r], npr[r], S, w, const,
-                             n_inc, n_sub) for r in range(n_probe)])
+                             n_inc, n_sub, model) for r in range(n_probe)])
     order = np.argsort(Jp)[::-1]
     traj = list(np.maximum.accumulate(Jp))
     best = (None, None, -np.inf)
     for sidx in order[:n_seed]:
         t, n0, J, jt = adam_ascent(lam, tp[sidx], npr[sidx], S, w, const,
                                    box, n_iter=n_iter, lr=lr,
-                                   n_inc=n_inc, n_sub=n_sub)
+                                   n_inc=n_inc, n_sub=n_sub, model=model)
         for j in jt:
             traj.append(max(traj[-1], float(j)))
         if J > best[2]:
@@ -155,11 +184,12 @@ def inverse_design(lam, S, w, const, box, n_probe=200, n_seed=4,
 
 
 def random_search(lam, S, w, const, box, budget, n_inc=1.0, n_sub=1.0,
-                  seed=1):
+                  seed=1, model=None):
     """Equal-budget random-search baseline."""
+    _check_model(w, model)
     rng = np.random.default_rng(seed)
     t, n0 = box.sample(rng, budget)
-    J = np.array([_merit_of(lam, t[r], n0[r], S, w, const, n_inc, n_sub)
-                  for r in range(budget)])
+    J = np.array([_merit_of(lam, t[r], n0[r], S, w, const, n_inc, n_sub,
+                            model) for r in range(budget)])
     b = int(np.argmax(J))
     return t[b], n0[b], float(J[b]), np.maximum.accumulate(J)

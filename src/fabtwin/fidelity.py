@@ -40,7 +40,8 @@ from .risk import cvar
 from .twins import apply_errors
 
 __all__ = ["moment_errors", "distribution_distances",
-           "induced_merits", "twin_fidelity_report"]
+           "induced_merits", "twin_fidelity_report", "energy_distance",
+           "drift_test", "novelty_pvalues"]
 
 
 def moment_errors(x_model, x_ref):
@@ -81,7 +82,8 @@ def distribution_distances(j_model, j_ref, alpha=0.05):
 
 
 def induced_merits(x, t_um, n0, lam_um, shape, weights, const,
-                   n_inc=1.0, n_sub=1.0, t_clip=None, n_clip=None):
+                   n_inc=1.0, n_sub=1.0, t_clip=None, n_clip=None,
+                   model=None):
     """Merit of one design under each error vector in x (K, 2N),
     through the exact solver. Optional (lo, hi) clips mirror the
     physical fabrication window used during robustification."""
@@ -96,6 +98,12 @@ def induced_merits(x, t_um, n0, lam_um, shape, weights, const,
         nn = np.clip(nn, *n_clip)
     J = np.empty(x.shape[0])
     for k in range(x.shape[0]):
+        if model is not None:
+            from .merits import model_spectra
+            R_, T_, A_ = model_spectra(model, lam_um, tt[k], nn[k], S,
+                                       n_inc, n_sub)
+            J[k] = model.merit(R_, T_, A_)[0]
+            continue
         T = tmm.transmittance(lam_um, tt[k], nn[k][:, None] * S,
                               n_inc, n_sub)
         J[k] = tmm.merit(T, weights, const)
@@ -104,7 +112,8 @@ def induced_merits(x, t_um, n0, lam_um, shape, weights, const,
 
 def twin_fidelity_report(x_model, x_heldout, designs, lam_um, shape,
                          weights, const, n_inc=1.0, n_sub=1.0,
-                         alpha=0.05, t_clip=None, n_clip=None):
+                         alpha=0.05, t_clip=None, n_clip=None,
+                         model=None):
     """The held-out fidelity report: pooled moment errors plus the
     induced-merit distances of `distribution_distances`, averaged over
     a bank of designs.
@@ -123,12 +132,118 @@ def twin_fidelity_report(x_model, x_heldout, designs, lam_um, shape,
     per = []
     for t_um, n0 in designs:
         jm = induced_merits(x_model, t_um, n0, lam_um, shape, weights,
-                            const, n_inc, n_sub, t_clip, n_clip)
+                            const, n_inc, n_sub, t_clip, n_clip, model)
         jr = induced_merits(x_heldout, t_um, n0, lam_um, shape,
                             weights, const, n_inc, n_sub, t_clip,
-                            n_clip)
+                            n_clip, model)
         per.append(distribution_distances(jm, jr, alpha))
     keys = ("d_mean", "d_P", "d_CVaR", "W1")
     induced = {k: float(np.mean([p[k] for p in per])) for k in keys}
     induced["alpha"] = float(alpha)
     return dict(moments=moments, induced=induced, per_design=per)
+
+
+# ----------------------------------------------------------------------
+# Has the machine changed? Is this run unlike anything logged? (0.7.0)
+
+
+def energy_distance(a, b):
+    """Two-sample energy distance between samples a (K, D) and b (M, D):
+
+        E = 2 mean|a - b| - mean|a - a'| - mean|b - b'|
+
+    (Euclidean norms over all pairs; G. J. Szekely and M. L. Rizzo,
+    "Testing for equal distributions in high dimension", InterStat
+    (2004)). It is zero for identical samples and, in the population,
+    zero only when the two distributions are equal."""
+    a = np.atleast_2d(np.asarray(a, dtype=float))
+    b = np.atleast_2d(np.asarray(b, dtype=float))
+    if a.shape[1] != b.shape[1]:
+        raise ValueError("samples must share the dimension D")
+
+    from scipy.spatial.distance import cdist
+
+    def mean_dist(u, v):
+        return float(cdist(u, v).mean())
+
+    return 2.0 * mean_dist(a, b) - mean_dist(a, a) - mean_dist(b, b)
+
+
+def drift_test(x_old, x_new, n_perm=999, seed=0, standardize=True):
+    """Permutation test of "the new runs come from the same process as
+    the old ones", on error vectors (from `errors_from_traces`).
+
+    The statistic is the energy distance; its null distribution is
+    built by reshuffling the pooled runs n_perm times, and the p-value
+    (1 + #{permuted >= observed}) / (1 + n_perm) is valid at every
+    sample size when the runs are exchangeable under the null (the
+    standard permutation argument). standardize=True scales every
+    component by the pooled standard deviation first, so thickness and
+    index errors count alike.
+
+    Returns dict(statistic, p_value, n_old, n_new). A small p-value is
+    evidence that the machine has drifted and the twin should be
+    refitted; a large one is NOT proof that nothing changed (the test
+    may lack power with few runs).
+    """
+    a = np.asarray(x_old, dtype=float)
+    b = np.asarray(x_new, dtype=float)
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[1]:
+        raise ValueError("x_old and x_new must be (K, D) and (M, D)")
+    if a.shape[0] < 2 or b.shape[0] < 2:
+        raise ValueError("need at least 2 runs in each group")
+    n_perm = int(n_perm)
+    if n_perm < 19:
+        raise ValueError("n_perm must be >= 19 (p-values below 0.05 "
+                         "need at least 19 permutations)")
+    pool = np.vstack([a, b])
+    if standardize:
+        sd = pool.std(axis=0, ddof=1)
+        sd[sd == 0] = 1.0
+        pool = (pool - pool.mean(axis=0)) / sd
+    K = a.shape[0]
+    obs = energy_distance(pool[:K], pool[K:])
+    rng = np.random.default_rng(seed)
+    count = 0
+    for _ in range(n_perm):
+        p = rng.permutation(pool.shape[0])
+        if energy_distance(pool[p[:K]], pool[p[K:]]) >= obs:
+            count += 1
+    return dict(statistic=float(obs),
+                p_value=(1.0 + count) / (1.0 + n_perm),
+                n_old=int(K), n_new=int(b.shape[0]))
+
+
+def novelty_pvalues(x_train, x_calib, x_new):
+    """Conformal p-values of "this run is like the logged ones".
+
+    A Gaussian twin is fitted to x_train; every run is scored by its
+    Mahalanobis distance from that fit; a new run's p-value is
+
+        p = (1 + #{calibration scores >= its score}) / (n_calib + 1).
+
+    If the new run is exchangeable with the calibration runs,
+    P(p <= u) <= u for every u (split-conformal outlier detection:
+    Vovk, Gammerman and Shafer, Algorithmic Learning in a Random World
+    (2005)). The score uses the twin only to rank runs; the validity
+    does not depend on the twin being right. A small p-value flags a
+    run whose error pattern the logged runs do not cover -- the case a
+    twin cannot vouch for.
+    """
+    from .twins import GaussianTwin
+    tr = np.asarray(x_train, dtype=float)
+    cal = np.asarray(x_calib, dtype=float)
+    new = np.atleast_2d(np.asarray(x_new, dtype=float))
+    if tr.ndim != 2 or cal.ndim != 2 or cal.shape[0] < 1 \
+            or new.shape[1] != cal.shape[1] or tr.shape[1] != cal.shape[1]:
+        raise ValueError("x_train, x_calib, x_new must share D")
+    tw = GaussianTwin(tr)
+
+    def score(x):
+        d = np.linalg.solve(tw.L, (x - tw.mu).T)
+        return np.sqrt(np.sum(d * d, axis=0))
+
+    sc = score(cal)
+    sn = score(new)
+    return (1.0 + np.sum(sc[None, :] >= sn[:, None], axis=1)) \
+        / (sc.size + 1.0)

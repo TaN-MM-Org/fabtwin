@@ -24,9 +24,10 @@ p-polarized interface reflectance, the equality of s and p at normal
 incidence, and agreement with the independent open-source `tmm`
 reference (S. J. Byrnes, arXiv:1603.02720) on random stacks.
 
-Merit functions are deliberately *linear in T* (weights plus a
+The merit functions here are *linear in T* (weights plus a
 constant), so the exact adjoint of `fabtwin.adjoint` needs only the
-weight vector; `notch_weights` and `bandpass_weights` build the two
+weight vector (nonlinear merits of R, T and A at any angle live in
+`fabtwin.merits`, new in 0.7.0); `notch_weights` and `bandpass_weights` build the two
 sensor-front-end merits of the FabGAN-ID study (Mahim et al., IEEE
 Sensors J., 2026) for any band layout, and any user-supplied weight
 vector works identically.
@@ -38,6 +39,16 @@ import numpy as np
 __all__ = ["stack_BC", "stack_rt", "transmittance", "reflectance",
            "notch_weights", "bandpass_weights", "merit",
            "weights_from_reflectance"]
+
+
+def _cos_branch(n, s0):
+    """cos(theta) in a medium of (conjugated) index n, with n cos(theta)
+    on the physical (fourth-quadrant) branch."""
+    cos = np.sqrt(1.0 - (s0 / n) ** 2 + 0.0j)      # principal root
+    ncos = n * cos
+    flip = (np.imag(ncos) > 0.0) & (np.abs(np.real(ncos))
+                                    <= 1e-14 * np.abs(ncos))
+    return np.where(flip, -cos, cos)
 
 
 def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
@@ -64,13 +75,26 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
     if n_sub_arr.ndim == 0:
         n_sub_arr = np.full(lam.size, n_sub_arr)
     if pol not in ("s", "p"):
-        raise ValueError("pol must be 's' or 'p'")
+        raise ValueError("pol must be 's' or 'p' ('u' in stack_rt, "
+                         "transmittance and reflectance)")
     s0 = n_inc * np.sin(float(theta0_rad))
-    # complex Snell cosines, principal branch
-    cos_l = np.sqrt(1.0 - (s0 / n) ** 2 + 0.0j)
-    cos_sub = np.sqrt(1.0 - (s0 / n_sub_arr) ** 2 + 0.0j)
-    cos_0 = np.sqrt(1.0 - (s0 / n_inc) ** 2 + 0.0j)
+    # complex Snell cosines. In the conjugated (n - i k) convention a
+    # wave travelling or decaying away from the interface has
+    # n cos(theta) in the fourth quadrant (Re >= 0, Im <= 0). The
+    # principal square root gives that automatically for absorbing
+    # media, but for a LOSSLESS medium beyond the critical angle
+    # (evanescent) it returns +i|.| on the branch cut; the physical
+    # root is -i|.|. (0.6.1 and earlier took the principal root there,
+    # which gave wrong R beyond the critical angle when the stack also
+    # absorbed; see the 0.7.0 changelog.)
+    cos_l = _cos_branch(n, s0)
+    cos_sub = _cos_branch(n_sub_arr, s0)
+    cos_0 = _cos_branch(n_inc, s0)
     delta = 2.0 * np.pi * n * cos_l * t[:, None] / lam[None, :]
+    if pol == "p" and np.any(np.abs(cos_sub) == 0.0):
+        raise ValueError("the substrate is exactly at its critical angle; "
+                         "the p admittance n / cos(theta) is infinite "
+                         "there")
     if pol == "s":
         eta = n * cos_l
         eta_sub = n_sub_arr * cos_sub
@@ -106,7 +130,14 @@ def stack_BC(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
 
 def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
              theta0_rad=0.0, pol="s"):
-    """Reflectance and transmittance (R, T) of the stack."""
+    """Reflectance and transmittance (R, T) of the stack. pol is "s",
+    "p" or (new in 0.7.0) "u", unpolarized light: the mean of s and p."""
+    if pol == "u":
+        Rs, Ts = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
+                          theta0_rad, "s")
+        Rp, Tp = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
+                          theta0_rad, "p")
+        return 0.5 * (Rs + Rp), 0.5 * (Ts + Tp)
     B, C, eta0, eta_sub = stack_BC(lam_um, t_um, n_layers, n_inc, n_sub,
                                    theta0_rad, pol)
     denom = eta0 * B + C
