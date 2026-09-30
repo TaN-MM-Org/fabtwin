@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.8.0 (2026-09-30)
+
+Measured coated plates (the substrate's back face), warnings when a
+spectrum fit cannot be trusted, and confidence intervals for yields
+and CVaRs.
+
+### Added
+
+- `n_exit=` in `stack_rt`, `transmittance`, `reflectance`,
+  `stack_rta_and_grads`, `OpticalModel`, `errors_from_spectrum` and
+  `errors_from_spectra`: a thick, non-absorbing substrate with a bare
+  back face and a medium of index `n_exit` behind it. `R` and `T` are
+  then those of the whole plate, as a spectrophotometer measures it;
+  the multiple reflections between coating and back face are summed
+  in power (incoherently), `T = Tf Tb / (1 - Rr Rb)`,
+  `R = Rf + Tf Tr Rb / (1 - Rr Rb)`, per polarization. Exact
+  derivatives of `R`, `T`, `A` (product and quotient rules on the
+  existing adjoint, run once from each side of the coating), so
+  design, robust design, scoring, correction and spectrum recovery all
+  work for a plate through `model=` or `n_exit=`. Default `None` keeps
+  the infinitely thick substrate of earlier versions.
+- `SpectrumRecovery.at_bound`, `JointRecovery.at_bound_t` and
+  `at_bound_n`: which recovered errors sit on the edge of the search
+  box (from SciPy's `active_mask`); `chi2_pvalue` on both: the
+  chi-square upper-tail probability of the fit when the noise level is
+  given (None otherwise).
+- `yield_interval` (exact Clopper-Pearson interval of a pass fraction,
+  C. J. Clopper and E. S. Pearson, Biometrika 26, 404 (1934));
+  `cvar_interval` (standard error and large-sample interval of a CVaR
+  estimate, from the linearization of the Rockafellar-Uryasev form);
+  `cvar_difference` (the same for the CVaR difference of two designs,
+  paired for common random numbers or unpaired).
+
+### Behaviour changes
+
+No returned number changes. New `RuntimeWarning`s, for calls whose
+results were already unreliable:
+
+- `errors_from_spectrum` and `errors_from_spectra` warn when a
+  recovered error sits on the search bound, and, when the noise level
+  is given, when the chi-square p-value is below 1e-6. Example: the
+  spectrum of README example 17 (a coated fused-silica plate with its
+  back face, 0.2 % noise) fitted without `n_exit` gave, in 0.7.0 and
+  now, thickness errors (-0.0735, 0.0284, 0.1211, -0.0842, 0.0312)
+  against the true (0.03, -0.02, 0.015, 0.01, -0.025), chi2 = 388.3
+  for 116 degrees of freedom, silently; 0.8.0 returns the same numbers
+  with a warning (p = 4.5e-31). With `n_exit=1.0`: (0.0374, -0.0432,
+  0.0417, -0.0018, -0.0195), chi2 p = 0.99. None of the 0.7.0 tests or
+  README examples triggers either warning.
+- `errors_from_spectrum` with a zero or negative `sigma_T` still
+  raises the same ValueError, but no longer emits a NumPy
+  divide-by-zero warning first.
+
+With `n_exit` left out, `stack_rt` and `stack_rta_and_grads` return
+the same numbers as 0.7.0 bit for bit (300 random cases compared
+against the 0.7.0 code, forward optics and every gradient; the
+internal Snell-invariant refactoring of `fabtwin.gradients` changed
+no arithmetic). README examples 1 to 16 print exactly what they
+printed with 0.7.0.
+
+### Tests
+
+132 tests (117 in 0.7.0). New files `test_substrate_backface.py` (8)
+and `test_uncertainty.py` (7). Independent references: the
+incoherent solver `inc_tmm` of the `tmm` package (to 1e-12 on 150
+random plates), the closed forms of a bare and of an ideally
+anti-reflection-coated plate, central finite differences, the
+closed-form chi-square tail for even degrees of freedom, binomial
+tails summed directly, exact binomial coverage, the closed-form CVaR
+and its linearized variance for a normal distribution, and seeded
+simulations (coverage of the 95 % CVaR interval asserted between
+91 % and 97 % with 40 tail draws, observed 93.2 %, and between 88 %
+and 96 % with 20, observed 91.1 %). The new tests add about 10 s.
+
+### Changed
+
+- README: examples 17 (a measured plate) and 18 (confidence intervals,
+  on the designs of example 3), new glossary entries, checks,
+  refusals, and Limits.
+
 ## 0.7.0 (2026-09-23)
 
 Gradients at any angle and with absorption, merits beyond w . T, an

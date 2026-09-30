@@ -39,6 +39,11 @@ It answers questions such as:
   thicknesses and the indices from the recipe?
 - Halfway through a run, how should the remaining layers change to
   make up for the errors already made?
+- A spectrophotometer measured a coated glass plate, back face and
+  all: what does the coating alone say about the layer errors?
+- How sure is a yield or a worst-10 % merit computed from a few
+  hundred simulated devices, and is one design really better than
+  another?
 
 The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
@@ -95,6 +100,15 @@ looks fine but is not.
   the **critical angle** (light going from a higher to a lower index
   at a steep angle) no light travels into the lower-index medium; the
   wave there only decays (it is **evanescent**).
+- **Thick substrate, back face** -- by default the substrate is
+  treated as infinitely thick: `T` is the light that enters it. A real
+  plate (say 1 mm of glass) has a second, uncoated face, and a
+  spectrophotometer measures what leaves that face, after light has
+  bounced between the coating and the back face. The plate is far
+  thicker than the distance over which the measuring light stays in
+  step with itself (its coherence length), so these bounces add up as
+  powers rather than as waves (**incoherently**). `n_exit` switches
+  this on (new in 0.8.0).
 - **Transfer-matrix method (TMM)** -- the standard exact calculation
   of `R` and `T` for a layer stack: one 2x2 matrix per layer,
   multiplied together (Macleod, *Thin-Film Optical Filters*).
@@ -160,6 +174,10 @@ looks fine but is not.
   gradient from a small random batch of simulated devices (a
   minibatch) at each step; an estimate is **unbiased** when its average
   over many batches equals the exact value.
+- **Confidence interval** -- a range computed from the data that
+  contains the true value in a stated fraction (say 95 %) of repeated
+  experiments. **Paired comparison** -- two designs scored on the same
+  random draws, so the noise they share cancels in their difference.
 - **Permutation test, energy distance** -- to ask whether two sets of
   runs come from the same machine, compute a distance between them
   (the energy distance, zero only for identical distributions), then
@@ -196,13 +214,13 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.7.0 (NumPy 2.4, SciPy 1.17, JAX 0.10 on
-Linux). Wavelength ranges, stacks, error sizes and noise levels are
+printed with fabtwin 0.8.0 (NumPy 2.4, SciPy 1.17, JAX 0.10 on
+Linux; examples 1 to 16 print exactly what they printed with 0.7.0). Wavelength ranges, stacks, error sizes and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
 literature references. All examples except example 8 need only the
 core install; example 8 needs the `[twin]` extra. Each ran in under
-15 seconds.
+20 seconds.
 
 ### 1. Transmittance of a stack, checked against textbook answers
 
@@ -934,6 +952,136 @@ for candidates while that increases the smallest distance between any
 two recipes. It is never worse than the greedy choice, and here it is
 26 % better, but it is still a local search, not a proven optimum.
 
+### 17. A measured glass plate: the back face counts
+
+```python
+import warnings
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.40, 0.80, 121)
+S = ft.dispersion_shape(lam, 0.550)
+nsub = ft.SIO2_MALITSON1965.n(lam)                    # a fused-silica plate
+t0 = np.array([0.070, 0.095, 0.060, 0.110, 0.080])    # recipe (um)
+n0 = np.array([2.2, 1.5, 2.2, 1.5, 2.2])
+xt = np.array([0.03, -0.02, 0.015, 0.01, -0.025])     # what the tool did (unknown)
+
+# A spectrophotometer measures the whole plate: the light also meets the
+# uncoated back face, with air behind it (n_exit=1.0).
+bare = ft.transmittance(lam, [], np.zeros((0, lam.size)), 1.0, nsub, n_exit=1.0)
+print(f"bare plate at {lam[60]:.2f} um: T = {bare[60]:.4f}, "
+      f"closed form 2n/(n^2+1) = {2 * nsub[60] / (nsub[60] ** 2 + 1):.4f}")
+T = ft.transmittance(lam, t0 * (1 + xt), n0[:, None] * S, 1.0, nsub, n_exit=1.0)
+T_meas = np.clip(T + np.random.default_rng(7).normal(0, 2e-3, lam.size), 0, 1)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    rec = ft.errors_from_spectrum(lam, T_meas, t0, n0, S, n_sub=nsub, sigma_T=2e-3)
+print("back face ignored: ", np.round(rec.dt_over_t, 4), f"chi2 p = {rec.chi2_pvalue:.0e}")
+print("  warning:", str(caught[0].message).split(":")[0])
+rec = ft.errors_from_spectrum(lam, T_meas, t0, n0, S, n_sub=nsub, sigma_T=2e-3,
+                              n_exit=1.0)
+print("back face included:", np.round(rec.dt_over_t, 4), f"chi2 p = {rec.chi2_pvalue:.2f}")
+print("  +/-              ", np.round(rec.sigma, 4))
+print("true:              ", xt)
+```
+
+```
+bare plate at 0.60 um: T = 0.9329, closed form 2n/(n^2+1) = 0.9329
+back face ignored:  [-0.0735  0.0284  0.1211 -0.0842  0.0312] chi2 p = 4e-31
+  warning: chi2 = 388.3 for 116 degrees of freedom (p = 4.48e-31)
+back face included: [ 0.0374 -0.0432  0.0417 -0.0018 -0.0195] chi2 p = 0.99
+  +/-               [0.0091 0.0238 0.0259 0.0105 0.0036]
+true:               [ 0.03  -0.02   0.015  0.01  -0.025]
+```
+
+A coated plate in a spectrophotometer is not the infinitely thick
+substrate of examples 1 to 16: light also reflects off the plate's
+uncoated back face (about 3.5 % for fused silica in air) and bounces
+back and forth between it and the coating. `n_exit=1.0` (the index of
+the air behind the plate) adds these bounces, in power, to `R` and `T`;
+the bare plate then gives the textbook `2n/(n^2+1)`. Fitting such a
+spectrum without `n_exit` asks the layers to explain the back-face
+loss: the answer is wrong (layer 1 comes out at -0.07 instead of
++0.03), and since the noise level is given, the chi-square check (new
+in 0.8.0, `chi2_pvalue`) flags it with a warning. With `n_exit` the
+fit is consistent with the noise and every error lies within 1.6
+of its error bars of the truth (layers 2 and 3 are poorly
+determined by this one spectrum, as their `+/-` says). `n_exit` works
+the same way in `stack_rt`, `transmittance`, `reflectance`,
+`stack_rta_and_grads` (with exact derivatives),
+`errors_from_spectra` and `OpticalModel`, so designs, robust designs
+and scores can be made for the whole plate too. The incidence medium,
+substrate and exit medium must be non-absorbing.
+
+The recovery functions also flag an error that sits on the edge of
+the search box (`at_bound`, with a warning): such a value was stopped
+by the box, not fitted.
+
+### 18. How sure are these numbers?
+
+```python
+import numpy as np
+import fabtwin as ft
+
+# the two designs of example 3
+lam = np.linspace(0.45, 0.65, 41)
+S = ft.dispersion_shape(lam, 0.550)
+nsub = ft.SIO2_MALITSON1965.n(lam)
+w, c0 = ft.notch_weights(lam, 0.532, 0.015, 0.030)
+box = ft.DesignBox(8, 0.020, 0.120, 1.6, 2.4)
+t, n0, J, _ = ft.inverse_design(lam, S, w, c0, box, n_probe=60,
+                                n_seed=2, n_iter=30, n_sub=nsub, seed=0)
+rng = np.random.default_rng(1)
+rt, rn, ftd, fnd = ft.PAPER_PROCESS.trace_dataset(*box.sample(rng, 40), 2, rng)
+twin = ft.GaussianTwin(ft.errors_from_traces(rt, rn, ftd, fnd))
+t_r, n_r, _ = ft.robustify(lam, t, n0, S, w, c0, twin, box, alpha=0.1,
+                           K=32, steps=40, lr=3e-3, seed=0, n_sub=nsub)
+
+# 500 runs of the reference process, the SAME random draws for both
+# designs (same seed), so the comparison is paired
+def runs(tt, nn):
+    return ft.PAPER_PROCESS.ensemble(tt, nn, 500, np.random.default_rng(7))
+
+J = {}
+stop = (lam >= 0.517) & (lam <= 0.547)
+pas = (lam <= 0.487) | (lam >= 0.577)
+for name, (tt, nn) in [("nominal", (t, n0)), ("robust", (t_r, n_r))]:
+    tf, nf = runs(tt, nn)
+    T = np.array([ft.transmittance(lam, tf[k], nf[k][:, None] * S, 1.0, nsub)
+                  for k in range(500)])
+    J[name] = ft.merit(T, w, c0)
+    ci = ft.cvar_interval(J[name], 0.1)
+    y = ft.yield_interval(ft.pass_fail(T, stop, pas, leak_max=0.3, pass_min=0.8))
+    print(f"{name:8s} CVaR(10 %) {ci['CVaR']:.4f} +/- {ci['se']:.4f}   "
+          f"yield {y['yield']:.3f} (95 % interval {y['lo']:.3f} to {y['hi']:.3f})")
+
+d = ft.cvar_difference(J["robust"], J["nominal"], 0.1)
+u = ft.cvar_difference(J["robust"], J["nominal"], 0.1, paired=False)
+print(f"robust - nominal: {d['difference']:.4f}, 95 % interval "
+      f"{d['lo']:.4f} to {d['hi']:.4f} (se {d['se']:.4f}; unpaired se {u['se']:.4f})")
+```
+
+```
+nominal  CVaR(10 %) 0.6779 +/- 0.0036   yield 0.014 (95 % interval 0.006 to 0.029)
+robust   CVaR(10 %) 0.7218 +/- 0.0026   yield 0.208 (95 % interval 0.173 to 0.246)
+robust - nominal: 0.0439, 95 % interval 0.0381 to 0.0498 (se 0.0030; unpaired se 0.0045)
+```
+
+The CVaR values are those of example 3, now with their Monte-Carlo
+standard errors. `cvar_interval` computes the standard error of a CVaR
+estimate from the draws themselves; `cvar_difference` does the same
+for the difference between two designs. Because both designs here were
+scored on the same random draws (same seed, same number of runs), the
+paired standard error (0.0030) is smaller than the one that ignores
+the pairing (0.0045), and the improvement of the robust design is well
+outside the Monte-Carlo noise. `yield_interval` gives the exact
+(Clopper-Pearson) confidence interval of a pass fraction; the
+specification here (`leak_max=0.3`, `pass_min=0.8`) is an illustrative
+choice. These intervals cover only the randomness of the draws: a
+twin or process model that is wrong about the machine stays wrong
+however many draws are taken.
+
 ## What is in the package
 
 Every name below is exported from `fabtwin` unless marked
@@ -959,7 +1107,9 @@ example) gives the inputs, units and conventions.
 
 - `stack_rt`, `transmittance`, `reflectance` -- exact transfer-matrix
   `R` and `T` for any stack, normal or oblique incidence, s or p
-  polarization, absorbing layers allowed.
+  polarization, absorbing layers allowed. New in 0.8.0: `n_exit=`
+  (the index behind a thick, non-absorbing substrate) gives `R` and `T`
+  of the whole plate, back face included (example 17).
 - `notch_weights`, `bandpass_weights` -- the two filter merits of the
   paper as weights `(w, const)`; `merit(T, w, const)` evaluates
   `w . T + const`.
@@ -982,15 +1132,16 @@ example) gives the inputs, units and conventions.
 - `stack_rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad,
   pol)` -- `R`, `T`, `A` and their derivatives with respect to every
   thickness, index real part and extinction `k`; `pol` is `"s"`, `"p"`
-  or `"u"` (unpolarized). `layer_indices(n0, shape, kext)` builds
-  `n0 * S + i k`.
+  or `"u"` (unpolarized); `n_exit=` as in `stack_rt` (new in 0.8.0).
+  `layer_indices(n0, shape, kext)` builds `n0 * S + i k`.
 - Merits: `LinearMerit(weights, const, quantity)` (`w . X + const` for
   `X` = `R`, `T` or `A`), `TargetMerit` (closeness to a target
   spectrum), `SpecMarginMerit` (a smooth pass/fail margin; `J > 0`
   guarantees the specification), `FunctionMerit` (your own).
-- `OpticalModel(merit, conditions, kext)` -- the merit, the measuring
-  conditions (a list of `(angle, polarization)`) and the fixed
-  absorption of the layers. `inverse_design`, `adam_ascent`,
+- `OpticalModel(merit, conditions, kext, n_exit)` -- the merit, the
+  measuring conditions (a list of `(angle, polarization)`), the fixed
+  absorption of the layers and (new in 0.8.0) the medium behind a
+  thick substrate. `inverse_design`, `adam_ascent`,
   `random_search`, `robustify`, `cvar_objective_and_grad`,
   `evaluate_under_process`, `induced_merits`, `twin_fidelity_report`
   and `reoptimize_remaining` take it as `model=` (with `w, const`
@@ -1033,6 +1184,13 @@ example) gives the inputs, units and conventions.
   `yield_fraction` -- the fraction that pass.
 - `evaluate_under_process(sampler, ...)` -- scores a design with `K`
   fresh fabricated samples from any process or twin.
+- New in 0.8.0 (example 18): `yield_interval(passed, confidence)` --
+  the exact Clopper-Pearson confidence interval of a pass fraction
+  (C. J. Clopper and E. S. Pearson, Biometrika 26, 404 (1934));
+  `cvar_interval(values, alpha)` -- a CVaR with its standard error and
+  a large-sample confidence interval; `cvar_difference(values,
+  baseline, alpha, paired=True)` -- the same for the difference of two
+  designs' CVaRs.
 
 **Design and robust design** (`fabtwin.design`, `fabtwin.robust`)
 
@@ -1078,12 +1236,17 @@ example) gives the inputs, units and conventions.
 **Reverse engineering** (`fabtwin.reverse`)
 
 - `errors_from_spectrum` -> `SpectrumRecovery` (fields `dt_over_t`,
-  `t_um`, `sigma`, `chi2`, `dof`, `condition_number`, `n_converged`)
-  (example 5).
+  `t_um`, `sigma`, `chi2`, `dof`, `condition_number`, `n_converged`;
+  new in 0.8.0: `at_bound`, `chi2_pvalue`) (example 5).
 - `errors_from_spectra(lam, measurements, ...)` -> `JointRecovery`
   (new in 0.7.0): several `Measurement(angle, pol, "T" or "R",
   values, sigma)` at once, thickness errors and, with `fit_index`,
-  index errors, optionally a parametric bootstrap (example 14).
+  index errors, optionally a parametric bootstrap (example 14); new in
+  0.8.0: fields `at_bound_t`, `at_bound_n`, `chi2_pvalue`.
+- Both take `n_exit=` for a measured plate with its back face (new in
+  0.8.0, example 17). Both warn (`RuntimeWarning`, results unchanged)
+  when an error sits on the edge of the search box, and, when the
+  noise level is given, when the chi-square p-value is below 1e-6.
 
 **Planning** (`fabtwin.lab`)
 
@@ -1181,11 +1344,19 @@ example) gives the inputs, units and conventions.
   fewer than 19 permutations; `mondrian_quantiles` has a group too
   small for the level; `reoptimize_remaining` gets no deposited or no
   remaining layers; `GaussianTwin.conditional` gets repeated or
-  invalid indices.
+  invalid indices;
+- new in 0.8.0: with `n_exit`, an absorbing incidence medium,
+  substrate or exit medium, a non-positive index, or an angle at which
+  no light travels in the substrate (beyond its critical angle: the
+  back face then plays no role); `yield_interval` gets a non-boolean
+  array, `k > n` or a confidence outside (0, 1); `cvar_interval` and
+  `cvar_difference` get fewer than `min_tail` (20 by default) draws in
+  the tail, and `cvar_difference` gets paired samples of different
+  lengths.
 
 ## How the results are checked
 
-117 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+132 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
@@ -1375,6 +1546,65 @@ statistical tolerances. The main checks:
   and is more than 20 % better in the tested three-layer case; the
   default is unchanged.
 
+**Thick substrate with a back face (0.8.0)**
+
+- `stack_rt(..., n_exit=)` agrees with the incoherent solver of the
+  independent `tmm` package (`inc_tmm`: coherent layers, a 1 mm
+  incoherent substrate, a semi-infinite exit medium) to 1e-12 on 150
+  random stacks: absorbing and lossless layers, s, p and unpolarized
+  light, angles up to 1.4 rad (80 degrees), incidence and exit media of index 1
+  and 1.33; and on a dispersive fused-silica substrate given as an
+  array.
+- A bare plate gives the textbook `T = 2n/(n^2+1)` and
+  `R = 2R1/(1+R1)` (`R1` the single-face reflectance), and an ideal
+  quarter-wave anti-reflection coating on the front leaves
+  `T = 1 - R1`, all to 1e-14; `R + T = 1` for non-absorbing plates
+  at 0.9 rad (52 degrees) in every polarization (1e-14).
+- Every derivative of `stack_rta_and_grads(..., n_exit=)` (`R`, `T`,
+  `A` with respect to thickness, `n` and `k`) matches central finite
+  differences of the forward optics on 12 random absorbing stacks
+  (relative 1e-7 plus absolute 1e-8); `OpticalModel(n_exit=)` spectra
+  equal `stack_rt` to 1e-13, and its merit gradient matches finite
+  differences (relative 1e-7).
+- From a plate spectrum computed by `tmm.inc_tmm`,
+  `errors_from_spectrum(n_exit=1.0)` recovers the thickness errors to
+  1e-6, and `errors_from_spectra` agrees with it (1e-8); thickness and
+  index errors together, from five noise-free plate spectra at 0, 45
+  and 60 degrees, to 1e-6. With 0.2 % noise and the back face ignored,
+  the recovered errors are wrong (at least one more than 4 error bars
+  from the truth) and the chi-square p-value is below 1e-6 with a
+  warning; with the back face, no warning, p above 1e-3, and every
+  error within 4 error bars.
+- The p-value equals the closed-form chi-square tail for an even
+  number of degrees of freedom (1e-12); an error forced beyond the
+  search box is flagged and warned about, for that layer only.
+- With `n_exit` left out, `stack_rt` and `stack_rta_and_grads` give
+  the same numbers as 0.7.0, bit for bit (checked on 300 random cases
+  when this release was made; not a stored test).
+
+**Confidence intervals (0.8.0)**
+
+- `yield_interval`: the bounds solve the binomial tail equations
+  (summed directly, 1e-10) for several `(k, n)`; the end cases equal
+  the closed forms `1 - (a/2)^(1/n)` and `(a/2)^(1/n)` (1e-12); the
+  exact coverage, summed over all outcomes for 199 true yields at
+  `n = 25`, is never below the confidence level.
+- `cvar_interval`: on 200000 normal draws the standard error matches
+  the closed-form value for a normal distribution within 2 %; over
+  2000 simulated samples of 400 draws (40 in the tail) the mean
+  standard error matches the scatter of the estimates within 6 %, and
+  the 95 % interval covers the true CVaR in between 91 % and 97 % of
+  them (93.2 % in the seeded run). With 200 draws (20 in the tail, the
+  smallest `min_tail` allows) the mean standard error is within 10 %
+  of the scatter and the coverage between 88 % and 96 % (91.1 % in the
+  seeded run). When `alpha K` is a whole number, the linearization
+  reproduces the estimate (1e-12).
+- `cvar_difference`: for two correlated merits (correlation 0.9,
+  2000 simulated paired samples) the paired standard error matches the
+  scatter of the estimated differences within 6 % and the 95 %
+  interval covers the truth in 92 % to 97 % of them; the unpaired
+  standard error is the root-sum-square of the two (1e-12).
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -1384,7 +1614,7 @@ works, not how good a trained twin is.
 
 ## Corrections in earlier versions
 
-**0.7.0 (this release) fixes a wrong reflectance beyond the critical
+**0.7.0 fixed a wrong reflectance beyond the critical
 angle.** Past the critical angle of a lossless medium (light arriving
 from glass at a steep angle, for example) the wave in that medium
 decays, and of the two square roots for `n cos(theta)` the solver must
@@ -1430,6 +1660,31 @@ use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
 
+What 0.8.0 changed about the limits of 0.7.0:
+
+- **Measured plates.** Up to 0.7.0 the substrate was always infinitely
+  thick, so a spectrum of a real coated plate (back face included)
+  could not be modelled, and fitting one gave wrong layer errors
+  without any sign of trouble. `n_exit` now models the back face, and
+  the recovery functions warn when the fit is inconsistent with the
+  stated noise or stopped by the search box. What is left: the
+  substrate, incidence and exit media must be non-absorbing (an
+  absorbing substrate would need its thickness and internal loss,
+  which are not modelled); the back face must be bare (uncoated) and
+  flat; the substrate is assumed much thicker than the coherence
+  length of the light (the fringes of a thin, coherent substrate are
+  not modelled); and the chi-square warning is only as good as the
+  stated noise level.
+- **How sure a number is.** `yield_interval`, `cvar_interval` and
+  `cvar_difference` give the Monte-Carlo uncertainty of a yield or a
+  CVaR. The yield interval is exact (conservative); the CVaR interval
+  is a large-sample approximation that covers somewhat less than its
+  level with few tail draws: in the tests' seeded simulation of a
+  normal merit, a nominal 95 % interval covered the truth in 91.1 % of
+  samples with 20 tail draws (the test asserts 88 % to 96 %) and
+  93.2 % with 40 (asserted 91 % to 97 %). Neither says anything about
+  whether the twin or process model is right.
+
 What 0.7.0 changed about the limits of 0.6.1, and what is left:
 
 - **Gradients.** The whole gradient path (design, robust design,
@@ -1461,7 +1716,8 @@ What 0.7.0 changed about the limits of 0.6.1, and what is left:
   `T`); whether they are determined is decided case by case by the
   refusals, and one normal-incidence spectrum is still not enough.
   Error bars are still local (linear or bootstrap around the best
-  fit); the dispersion shape of each layer is held at the recipe.
+  fit); the dispersion shape of each layer is held at the recipe. (A
+  plate's back face: see the 0.8.0 part above.)
 - **Conformal guarantees.** `mondrian_quantiles` gives a guarantee per
   group, but only for groups with their own held-out runs; a guarantee
   for every recipe at once, without such runs, is impossible for any
