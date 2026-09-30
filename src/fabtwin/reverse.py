@@ -40,13 +40,21 @@ every refusal above still applies, so whether a measurement set
 determines the indices is decided by the data, case by case -- the
 tests show one normal-incidence spectrum refused and a multi-angle
 set recovering both.
+
+New in 0.8.0: `n_exit=` fits the spectrum of a whole coated plate,
+back face included (see `fabtwin.tmm.stack_rt`); and both functions
+report, and warn about, errors stopped by the search box (`at_bound`)
+and fits inconsistent with the stated noise level (`chi2_pvalue`
+below 1e-6) -- results that were returned silently before.
 """
 from __future__ import annotations
 
 import dataclasses
+import warnings
 
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.stats import chi2 as _chi2_dist
 
 from .adjoint import transmittance_and_grads
 
@@ -68,6 +76,18 @@ class SpectrumRecovery:
     condition_number : of the weighted Jacobian at the solution.
     n_converged : how many of the multi-starts converged; they all
     agreed, or this object would not exist.
+    at_bound : (N,) bool (new in 0.8.0) -- True where the recovered
+    error sits on the bound of the search box (+/- 2 max_error). Such a
+    value is not a fitted answer, and its sigma means nothing: the true
+    error is outside the box, or the model misses something in the
+    measurement (for example the substrate's back face; see n_exit). A
+    RuntimeWarning is issued whenever any entry is True.
+    chi2_pvalue : (new in 0.8.0) probability that chi2 would be at
+    least this large for a correct model with the stated sigma_T (the
+    chi-square upper tail with dof degrees of freedom); None when
+    sigma_T was not given or dof is 0. A tiny value means the model
+    does not describe the measurement; below 1e-6 a RuntimeWarning is
+    issued.
     """
 
     dt_over_t: np.ndarray
@@ -77,12 +97,50 @@ class SpectrumRecovery:
     dof: int
     condition_number: float
     n_converged: int
+    at_bound: np.ndarray = None
+    chi2_pvalue: object = None
+
+
+def _bound_check(x, active_mask, names):
+    """at_bound mask from least_squares' active_mask, with a warning."""
+    at = np.asarray(active_mask) != 0
+    if np.any(at):
+        warnings.warn(
+            "recovered " + ", ".join(names[i] for i in np.nonzero(at)[0])
+            + " sit(s) on the bound of the search box: that value is not "
+            "a fitted answer and its uncertainty means nothing. The true "
+            "error is larger than the box allows, or the model misses "
+            "something in the measurement (for a coated plate measured in "
+            "a spectrophotometer, the substrate's back face: pass n_exit)",
+            RuntimeWarning, stacklevel=3)
+    return at
+
+
+CHI2_WARN_PVALUE = 1e-6
+
+
+def _chi2_pvalue(chi2, dof, have_sigma):
+    """Chi-square upper-tail probability, with a warning when the fit is
+    statistically inconsistent with the stated noise level."""
+    if not have_sigma or dof <= 0:
+        return None
+    p = float(_chi2_dist.sf(chi2, dof))
+    if p < CHI2_WARN_PVALUE:
+        warnings.warn(
+            f"chi2 = {chi2:.4g} for {dof} degrees of freedom (p = {p:.3g}): "
+            "the fitted model does not describe the measurement at the "
+            "stated noise level, so the recovered errors and their "
+            "uncertainties are not trustworthy. Check the noise level, the "
+            "recipe, the substrate and, for a coated plate, its back face "
+            "(n_exit)", RuntimeWarning, stacklevel=3)
+    return p
 
 
 def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
                          n_inc=1.0, n_sub=1.0, sigma_T=None,
                          max_error=0.10, n_starts=8, seed=0,
-                         chi2_rtol=1e-3, distinct_atol=1e-4):
+                         chi2_rtol=1e-3, distinct_atol=1e-4,
+                         n_exit=None):
     """Per-layer relative thickness errors from one measured T(lam).
 
     lam_um, T_meas : the measured spectrum (transmittance in [0, 1]).
@@ -97,6 +155,13 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     their chi2 agree within chi2_rtol, and "distinct" when any layer's
     recovered error differs by more than distinct_atol -- both
     conditions together trigger the non-uniqueness refusal.
+
+    n_exit : None (default: an infinitely thick substrate) or the real
+    index behind a thick, lossless substrate with a bare back face
+    (1.0 for air; new in 0.8.0). A spectrophotometer measures the whole
+    coated plate, back face included; fitting such a spectrum with
+    n_exit=None asks the layers to explain the back-face loss (about
+    4 % for glass in air) and gives wrong errors.
 
     Returns a `SpectrumRecovery`. Raises ValueError when the recovery
     is underdetermined, degenerate, or non-unique (module docstring).
@@ -119,19 +184,34 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     if sigma_T is None:
         w = np.ones(L)
     else:
-        w = 1.0 / np.broadcast_to(np.asarray(sigma_T, dtype=float), (L,))
-        if np.any(~np.isfinite(w)) or np.any(w <= 0):
+        sig = np.broadcast_to(np.asarray(sigma_T, dtype=float), (L,))
+        if np.any(~np.isfinite(sig)) or np.any(sig <= 0):
             raise ValueError("sigma_T must be positive and finite")
+        w = 1.0 / sig
+
+    if n_exit is None:
+        def T_and_dTdt(tt):
+            T, dT_dt, _ = transmittance_and_grads(lam, tt, n0, shape,
+                                                  n_inc=n_inc,
+                                                  n_sub=n_sub)
+            return T, dT_dt
+    else:
+        from .gradients import layer_indices, stack_rta_and_grads
+        # the lossless-design checks of the adjoint path, kept
+        transmittance_and_grads(lam, t0, n0, shape, n_inc=n_inc,
+                                n_sub=n_sub)
+        n_lay = layer_indices(np.asarray(n0, dtype=float), shape)
+
+        def T_and_dTdt(tt):
+            g = stack_rta_and_grads(lam, tt, n_lay, n_inc, n_sub, 0.0,
+                                    "s", n_exit=n_exit)
+            return g["T"], g["dT_dt"]
 
     def resid(x):
-        T, _, _ = transmittance_and_grads(lam, t0 * (1.0 + x), n0, shape,
-                                          n_inc=n_inc, n_sub=n_sub)
-        return (T - Tm) * w
+        return (T_and_dTdt(t0 * (1.0 + x))[0] - Tm) * w
 
     def jac(x):
-        _, dT_dt, _ = transmittance_and_grads(lam, t0 * (1.0 + x), n0,
-                                              shape, n_inc=n_inc,
-                                              n_sub=n_sub)
+        dT_dt = T_and_dTdt(t0 * (1.0 + x))[1]
         return (dT_dt * t0[:, None]).T * w[:, None]      # (L, N)
 
     resid(np.zeros(N))          # input errors surface here (0.7.0)
@@ -149,14 +229,14 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
         except Exception:
             continue
         if r.success or r.status > 0:
-            sols.append((float(np.sum(r.fun ** 2)), r.x))
+            sols.append((float(np.sum(r.fun ** 2)), r.x, r.active_mask))
     if not sols:
         raise ValueError("no multi-start converged; the spectrum is "
                          "inconsistent with the recipe within the "
                          "search box")
     sols.sort(key=lambda s: s[0])
-    chi2_best, x_best = sols[0]
-    for chi2_i, x_i in sols[1:]:
+    chi2_best, x_best, active = sols[0]
+    for chi2_i, x_i, _ in sols[1:]:
         close_fit = chi2_i <= chi2_best * (1.0 + chi2_rtol) + 1e-15
         distinct = np.max(np.abs(x_i - x_best)) > distinct_atol
         if close_fit and distinct:
@@ -179,10 +259,14 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     dof = L - N
     if sigma_T is None and dof > 0:
         cov = cov * (chi2_best / dof)            # residual-scaled
+    at = _bound_check(x_best, active,
+                      [f"layer {i + 1} thickness error" for i in range(N)])
     return SpectrumRecovery(
         dt_over_t=x_best, t_um=t0 * (1.0 + x_best),
         sigma=np.sqrt(np.diag(cov)), chi2=chi2_best, dof=dof,
-        condition_number=float(sv[0] / sv[-1]), n_converged=len(sols))
+        condition_number=float(sv[0] / sv[-1]), n_converged=len(sols),
+        at_bound=at,
+        chi2_pvalue=_chi2_pvalue(chi2_best, dof, sigma_T is not None))
 
 
 # ----------------------------------------------------------------------
@@ -216,7 +300,10 @@ class JointRecovery:
     t_um, n0 : the recovered stack; sigma_t, sigma_n : linear
     (Jacobian) one-sigma uncertainties; boot_sigma_t, boot_sigma_n :
     the same from a parametric bootstrap (None unless requested);
-    chi2, dof, condition_number, n_converged as in `SpectrumRecovery`.
+    chi2, dof, condition_number, n_converged, chi2_pvalue as in
+    `SpectrumRecovery`; at_bound_t, at_bound_n : (N,) bool, True where
+    that error sits on the search bound (new in 0.8.0; a RuntimeWarning
+    is issued, see `SpectrumRecovery.at_bound`).
     """
 
     dt_over_t: np.ndarray
@@ -231,13 +318,16 @@ class JointRecovery:
     dof: int
     condition_number: float
     n_converged: int
+    at_bound_t: np.ndarray = None
+    at_bound_n: np.ndarray = None
+    chi2_pvalue: object = None
 
 
 def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
                         fit_index=False, kext=None, n_inc=1.0, n_sub=1.0,
                         max_error=0.10, max_index_error=0.10, n_starts=8,
                         seed=0, chi2_rtol=1e-3, distinct_atol=1e-4,
-                        cond_max=1e10, n_boot=0):
+                        cond_max=1e10, n_boot=0, n_exit=None):
     """Per-layer thickness errors -- and, if asked, index errors -- from
     one or SEVERAL measured spectra (new in 0.7.0).
 
@@ -268,6 +358,9 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         or residual-estimated, size) are refitted from the best fit, and
         the spread of their results is reported next to the linear
         uncertainties.
+    n_exit : None or the real index behind a thick, lossless substrate
+        with a bare back face (new in 0.8.0; see
+        `errors_from_spectrum`). Applies to every measurement.
     """
     from .gradients import layer_indices, stack_rta_and_grads
     lam = np.asarray(lam_um, dtype=float)
@@ -335,7 +428,7 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         pred, jac = [], []
         for m in meas:
             g = stack_rta_and_grads(lam, t, n, n_inc, n_sub,
-                                    m.theta0_rad, m.pol)
+                                    m.theta0_rad, m.pol, n_exit=n_exit)
             q = m.quantity
             pred.append(g[q])
             Jt = (g[f"d{q}_dt"] * t0[:, None]).T             # (L, N)
@@ -374,14 +467,14 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         except Exception:
             continue
         if r.success or r.status > 0:
-            sols.append((float(np.sum(r.fun ** 2)), r.x))
+            sols.append((float(np.sum(r.fun ** 2)), r.x, r.active_mask))
     if not sols:
         raise ValueError("no multi-start converged; the spectra are "
                          "inconsistent with the recipe within the "
                          "search box")
     sols.sort(key=lambda s_: s_[0])
-    chi2_best, p_best = sols[0]
-    for chi2_i, p_i in sols[1:]:
+    chi2_best, p_best, active = sols[0]
+    for chi2_i, p_i, _ in sols[1:]:
         if chi2_i <= chi2_best * (1.0 + chi2_rtol) + 1e-15 and \
                 np.max(np.abs(p_i - p_best)) > distinct_atol:
             raise ValueError(
@@ -409,6 +502,12 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
     sig_n[mask] = sd[N:]
     dn_best = np.zeros(N)
     dn_best[mask] = p_best[N:]
+    at = _bound_check(
+        p_best, active,
+        [f"layer {i + 1} thickness error" for i in range(N)]
+        + [f"layer {i + 1} index error" for i in np.nonzero(mask)[0]])
+    at_n = np.zeros(N, bool)
+    at_n[mask] = at[N:]
 
     boot_t = boot_n = None
     if int(n_boot) > 0:
@@ -438,4 +537,6 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         dt_over_t=p_best[:N], dn=dn_best, t_um=t0 * (1.0 + p_best[:N]),
         n0=n0 + dn_best, sigma_t=sd[:N], sigma_n=sig_n,
         boot_sigma_t=boot_t, boot_sigma_n=boot_n, chi2=chi2_best,
-        dof=dof, condition_number=float(cond), n_converged=len(sols))
+        dof=dof, condition_number=float(cond), n_converged=len(sols),
+        at_bound_t=at[:N], at_bound_n=at_n,
+        chi2_pvalue=_chi2_pvalue(chi2_best, dof, have_sigma))

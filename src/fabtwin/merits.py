@@ -173,11 +173,17 @@ class OpticalModel:
         default normal incidence.
     kext : None, (L,) or (N, L) extinction coefficients of the layers
         (fixed; the design varies thickness and the real index scale).
+    n_exit : None (default: an infinitely thick substrate, as before)
+        or the real index of the medium behind a thick, lossless
+        substrate with a bare back face (1.0 for air; new in 0.8.0).
+        The spectra are then those of the whole coated plate, as a
+        spectrophotometer measures it (`fabtwin.tmm.stack_rt`).
     """
 
     merit: object
     conditions: tuple = ((0.0, "s"),)
     kext: object = None
+    n_exit: object = None
 
     def __post_init__(self):
         c = self.conditions
@@ -198,6 +204,12 @@ class OpticalModel:
         if not callable(self.merit):
             raise ValueError("merit must be one of the fabtwin merits "
                              "(or callable like them)")
+        if self.n_exit is not None:
+            ne = np.asarray(self.n_exit)
+            if np.iscomplexobj(ne) or ne.ndim > 1 or \
+                    not np.all(np.isfinite(ne)) or np.any(ne <= 0):
+                raise ValueError("n_exit must be None, or a positive real "
+                                 "scalar or (L,) array")
 
 
 def model_spectra(model, lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0,
@@ -205,7 +217,8 @@ def model_spectra(model, lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0,
     """Spectra (C, L) of R, T, A under every condition (and, with
     grads=True, the per-condition gradient dicts)."""
     n = layer_indices(n0, shape, model.kext)
-    out = [stack_rta_and_grads(lam_um, t_um, n, n_inc, n_sub, a, p)
+    out = [stack_rta_and_grads(lam_um, t_um, n, n_inc, n_sub, a, p,
+                               n_exit=model.n_exit)
            for a, p in model.conditions]
     R = np.array([o["R"] for o in out])
     T = np.array([o["T"] for o in out])

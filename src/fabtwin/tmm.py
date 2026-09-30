@@ -24,6 +24,14 @@ p-polarized interface reflectance, the equality of s and p at normal
 incidence, and agreement with the independent open-source `tmm`
 reference (S. J. Byrnes, arXiv:1603.02720) on random stacks.
 
+A thick substrate with a bare back face (new in 0.8.0, `n_exit=`):
+the coherent coating above is combined with the substrate's back face
+by summing the multiple reflections between them in power
+(incoherently), which is how a spectrophotometer sees a coated plate
+much thicker than the coherence length of its light; the tests hold
+this to the incoherent solver `inc_tmm` of the same `tmm` reference
+and to the closed-form bare plate T = 2n / (n^2 + 1).
+
 The merit functions here are *linear in T* (weights plus a
 constant), so the exact adjoint of `fabtwin.adjoint` needs only the
 weight vector (nonlinear merits of R, T and A at any angle live in
@@ -52,7 +60,11 @@ def _cos_branch(n, s0):
 
 
 def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
-                            theta0_rad, pol):
+                            theta0_rad, pol, s0=None):
+    # s0 (internal, new in 0.8.0): the Snell invariant n sin(theta),
+    # given directly when the incidence medium is a dispersive (L,)
+    # array -- the substrate seen from inside, for the thick-substrate
+    # calculation. The public path (s0=None) is unchanged.
     lam = np.asarray(lam_um, dtype=float)
     t = np.asarray(t_um, dtype=float)
     n = np.asarray(n_layers)
@@ -65,19 +77,27 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
     # ecosystem convention, e.g. the open tmm package); the Macleod
     # characteristic-matrix recursion below wants n - i k, so conjugate
     # internally. Gain media (k < 0) are refused, not extrapolated.
-    if np.any(np.imag(n) < 0) or np.imag(complex(n_inc)) < 0 \
+    if s0 is None:
+        inc_gain = np.imag(complex(n_inc)) < 0
+    else:
+        inc_gain = np.any(np.imag(np.asarray(n_inc)) < 0)
+    if np.any(np.imag(n) < 0) or inc_gain \
             or np.any(np.imag(np.asarray(n_sub)) < 0):
         raise ValueError("negative Im(n) (gain) is out of scope; "
                          "absorbing media carry n + i k with k >= 0")
     n = np.conj(n)
-    n_inc = np.conj(complex(n_inc))
+    if s0 is None:
+        n_inc = np.conj(complex(n_inc))
+    else:
+        n_inc = np.conj(np.asarray(n_inc)) + 0.0j
     n_sub_arr = np.conj(np.asarray(n_sub)) + 0.0j
     if n_sub_arr.ndim == 0:
         n_sub_arr = np.full(lam.size, n_sub_arr)
     if pol not in ("s", "p"):
         raise ValueError("pol must be 's' or 'p' ('u' in stack_rt, "
                          "transmittance and reflectance)")
-    s0 = n_inc * np.sin(float(theta0_rad))
+    if s0 is None:
+        s0 = n_inc * np.sin(float(theta0_rad))
     # complex Snell cosines. In the conjugated (n - i k) convention a
     # wave travelling or decaying away from the interface has
     # n cos(theta) in the fourth quadrant (Re >= 0, Im <= 0). The
@@ -107,7 +127,7 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
 
 
 def stack_BC(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-             theta0_rad=0.0, pol="s"):
+             theta0_rad=0.0, pol="s", _s0=None):
     """The Macleod (B, C) vectors and the admittances (eta0, eta_sub).
 
     lam_um : (L,) wavelengths; t_um : (N,) thicknesses;
@@ -115,7 +135,7 @@ def stack_BC(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     Returns B, C, eta0 (complex, possibly (L,)), eta_sub (L,).
     """
     delta, eta, eta0, eta_sub = _phases_and_admittances(
-        lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol)
+        lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol, _s0)
     c = np.cos(delta)
     s = np.sin(delta)
     B = np.ones(delta.shape[1], dtype=complex)
@@ -128,18 +148,10 @@ def stack_BC(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     return B, C, eta0, eta_sub
 
 
-def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-             theta0_rad=0.0, pol="s"):
-    """Reflectance and transmittance (R, T) of the stack. pol is "s",
-    "p" or (new in 0.7.0) "u", unpolarized light: the mean of s and p."""
-    if pol == "u":
-        Rs, Ts = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                          theta0_rad, "s")
-        Rp, Tp = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                          theta0_rad, "p")
-        return 0.5 * (Rs + Rp), 0.5 * (Ts + Tp)
+def _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol,
+                 s0=None):
     B, C, eta0, eta_sub = stack_BC(lam_um, t_um, n_layers, n_inc, n_sub,
-                                   theta0_rad, pol)
+                                   theta0_rad, pol, s0)
     denom = eta0 * B + C
     r = (eta0 * B - C) / denom
     R = np.abs(r) ** 2
@@ -147,18 +159,115 @@ def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     return R, T
 
 
+def _thick_substrate_media(lam_um, n_inc, n_sub, n_exit, theta0_rad):
+    """Check and prepare the media of a thick-substrate calculation.
+
+    Returns (n_inc float, n_sub (L,), n_exit (L,), s0) with
+    s0 = n_inc sin(theta0), the Snell invariant. Refuses an absorbing
+    incidence medium, substrate or exit medium (the incoherent power
+    sum below is written for lossless ones), and an angle at which no
+    light travels in the substrate (s0 >= n_sub: nothing reaches the
+    back face, so it plays no role; use n_exit=None)."""
+    lam = np.asarray(lam_um, dtype=float)
+    L = lam.size
+    out = []
+    for name, v in (("n_inc", n_inc), ("n_sub", n_sub),
+                    ("n_exit", n_exit)):
+        a = np.asarray(v)
+        if np.iscomplexobj(a) and np.any(np.imag(a) != 0):
+            raise ValueError(
+                f"with n_exit (a thick substrate with a bare back face), "
+                f"{name} must be lossless (real): the back-face "
+                "reflections are summed in power for a non-absorbing "
+                "substrate")
+        a = np.real(a).astype(float)
+        if name == "n_inc":
+            if a.ndim != 0:
+                raise ValueError("n_inc must be a scalar with n_exit")
+        elif a.ndim == 0:
+            a = np.full(L, float(a))
+        elif a.shape != (L,):
+            raise ValueError(f"{name} must be a scalar or (L,)")
+        if not np.all(np.isfinite(a)) or np.any(a <= 0):
+            raise ValueError(f"{name} must be positive and finite")
+        out.append(a)
+    ni, ns, ne = out
+    s0 = float(ni) * np.sin(float(theta0_rad))
+    if np.any(s0 >= ns):
+        raise ValueError(
+            "no light travels in the substrate at this angle (beyond its "
+            "critical angle), so its back face plays no role; use "
+            "n_exit=None")
+    return float(ni), ns, ne, s0
+
+
+def _thick_rt(lam_um, t_um, n_layers, n_inc, n_sub, n_exit, theta0_rad,
+              pol):
+    lam = np.asarray(lam_um, dtype=float)
+    ni, ns, ne, s0 = _thick_substrate_media(lam, n_inc, n_sub, n_exit,
+                                           theta0_rad)
+    t = np.asarray(t_um, dtype=float)
+    n = np.asarray(n_layers)
+    Rf, Tf = _coherent_rt(lam, t, n, ni, ns, theta0_rad, pol)
+    # the same stack seen from inside the substrate (layers reversed)
+    Rr, Tr = _coherent_rt(lam, t[::-1], n[::-1], ns, ni, 0.0, pol, s0)
+    # the bare back face: substrate -> exit medium
+    Rb, Tb = _coherent_rt(lam, np.zeros(0), np.zeros((0, lam.size)), ns,
+                          ne, 0.0, pol, s0)
+    den = 1.0 - Rr * Rb
+    return Rf + Tf * Tr * Rb / den, Tf * Tb / den
+
+
+def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
+             theta0_rad=0.0, pol="s", n_exit=None):
+    """Reflectance and transmittance (R, T) of the stack. pol is "s",
+    "p" or (new in 0.7.0) "u", unpolarized light: the mean of s and p.
+
+    n_exit (new in 0.8.0) : None (default) treats the substrate as
+    infinitely thick, as before: R and T are the powers reflected by
+    the coating and transmitted INTO the substrate. A number (or an
+    (L,) array) instead makes the substrate a thick, lossless slab
+    whose bare back face meets a medium of index n_exit (1.0 for air):
+    R and T are then the powers leaving the whole sample, which is what
+    a spectrophotometer measures on a coated glass plate. The light
+    bouncing between the coating and the back face is added in power,
+    not in amplitude (incoherently), as for a substrate much thicker
+    than the coherence length of the measuring light:
+
+        T = Tf Tb / (1 - Rr Rb),   R = Rf + Tf Tr Rb / (1 - Rr Rb),
+
+    with Rf, Tf the coating seen from the incidence side, Rr, Tr the
+    coating seen from inside the substrate, and Rb, Tb the back face.
+    Unpolarized light is summed per polarization first. The
+    incidence medium, substrate and exit medium must be lossless.
+    """
+    if pol == "u":
+        Rs, Ts = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
+                          theta0_rad, "s", n_exit)
+        Rp, Tp = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
+                          theta0_rad, "p", n_exit)
+        return 0.5 * (Rs + Rp), 0.5 * (Ts + Tp)
+    if n_exit is not None:
+        if pol not in ("s", "p"):
+            raise ValueError("pol must be 's', 'p' or 'u'")
+        return _thick_rt(lam_um, t_um, n_layers, n_inc, n_sub, n_exit,
+                         theta0_rad, pol)
+    return _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad,
+                        pol)
+
+
 def transmittance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                  theta0_rad=0.0, pol="s"):
-    """Intensity transmittance T(lam)."""
+                  theta0_rad=0.0, pol="s", n_exit=None):
+    """Intensity transmittance T(lam) (n_exit: see `stack_rt`)."""
     return stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                    theta0_rad, pol)[1]
+                    theta0_rad, pol, n_exit)[1]
 
 
 def reflectance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                theta0_rad=0.0, pol="s"):
-    """Intensity reflectance R(lam)."""
+                theta0_rad=0.0, pol="s", n_exit=None):
+    """Intensity reflectance R(lam) (n_exit: see `stack_rt`)."""
     return stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                    theta0_rad, pol)[0]
+                    theta0_rad, pol, n_exit)[0]
 
 
 # ------------------------- linear merits --------------------------

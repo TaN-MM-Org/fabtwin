@@ -88,10 +88,11 @@ def layer_indices(n0, shape, kext=None):
     return n + 1j * K
 
 
-def _one_pol(lam, t, n_layers, n_inc, n_sub, theta0, pol):
+def _one_pol(lam, t, n_layers, n_inc, n_sub, s0, pol):
+    # n_inc : real scalar, or a real (L,) array (the substrate seen from
+    # inside, for the thick-substrate case); s0 = the Snell invariant
     nprime = np.conj(np.asarray(n_layers, dtype=complex))   # (N, L)
     N, L = nprime.shape
-    s0 = n_inc * np.sin(theta0)
     cos_l = _cos_branch(nprime, s0)
     q = nprime * cos_l                                       # n' cos
     if N and np.any(np.abs(q) < 1e-9 * np.abs(nprime)):
@@ -105,7 +106,7 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, theta0, pol):
     if pol == "p" and np.any(np.abs(cos_s) == 0.0):
         raise ValueError("the substrate is exactly at its critical angle; "
                          "the p admittance is infinite there")
-    cos_0 = _cos_branch(np.complex128(n_inc), s0)
+    cos_0 = _cos_branch(np.asarray(n_inc, dtype=np.complex128), s0)
     if pol == "s":
         eta = q
         deta = nprime / q
@@ -189,8 +190,38 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, theta0, pol):
     return out
 
 
+def _thick_one_pol(lam, t, n, n_inc, n_sub, n_exit, s0, pol):
+    """Thick lossless substrate with a bare back face (incoherent power
+    sum; `fabtwin.tmm.stack_rt` gives the formulas), with the exact
+    derivatives by the product and quotient rules:
+
+        T = Tf Tb / d,   R = Rf + Tf Tr Rb / d,   d = 1 - Rr Rb,
+        dT = Tb (dTf / d + Tf Rb dRr / d^2),
+        dR = dRf + Rb ((dTf Tr + Tf dTr) / d + Tf Tr Rb dRr / d^2),
+
+    where the reversed-stack quantities (Rr, Tr and their derivatives)
+    come from the same adjoint with the layer order flipped, and the
+    back face (Rb, Tb) does not depend on the layers."""
+    f = _one_pol(lam, t, n, n_inc, n_sub, s0, pol)
+    r = _one_pol(lam, t[::-1], n[::-1], n_sub, n_inc, s0, pol)
+    b = _one_pol(lam, np.zeros(0), np.zeros((0, lam.size)), n_sub,
+                 n_exit, s0, pol)
+    Rb, Tb = b["R"], b["T"]
+    d = 1.0 - r["R"] * Rb
+    out = dict(R=f["R"] + f["T"] * r["T"] * Rb / d,
+               T=f["T"] * Tb / d)
+    for p in ("t", "n", "k"):
+        dTf, dRf = f[f"dT_d{p}"], f[f"dR_d{p}"]
+        dTr, dRr = r[f"dT_d{p}"][::-1], r[f"dR_d{p}"][::-1]
+        out[f"dT_d{p}"] = Tb * (dTf / d + f["T"] * Rb * dRr / d ** 2)
+        out[f"dR_d{p}"] = dRf + Rb * ((dTf * r["T"] + f["T"] * dTr) / d
+                                      + f["T"] * r["T"] * Rb * dRr
+                                      / d ** 2)
+    return out
+
+
 def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                        theta0_rad=0.0, pol="s"):
+                        theta0_rad=0.0, pol="s", n_exit=None):
     """R, T, A and their exact derivatives for any stack and angle.
 
     lam_um : (L,) wavelengths; t_um : (N,) thicknesses; n_layers :
@@ -198,6 +229,11 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     incidence medium; n_sub : substrate index (scalar or (L,), may
     absorb); theta0_rad : angle of incidence; pol : "s", "p" or "u"
     (unpolarized: the mean of s and p).
+    n_exit (new in 0.8.0) : None (default: infinitely thick substrate)
+    or the real index behind a thick, lossless substrate with a bare
+    back face; R, T, A are then those of the whole sample, as a
+    spectrophotometer measures a coated plate (see
+    `fabtwin.tmm.stack_rt`). The substrate must then be lossless.
 
     Returns a dict with R, T, A (L,) and, each (N, L), the derivatives
     with respect to every layer thickness (dR_dt, dT_dt, dA_dt), the
@@ -225,14 +261,26 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     th = float(theta0_rad)
     if not (0.0 <= th < np.pi / 2):
         raise ValueError("theta0_rad must lie in [0, pi/2)")
-    if pol in ("s", "p"):
-        out = _one_pol(lam, t, n, n_inc, n_sub, th, pol)
-    elif pol == "u":
-        a = _one_pol(lam, t, n, n_inc, n_sub, th, "s")
-        b = _one_pol(lam, t, n, n_inc, n_sub, th, "p")
-        out = {k: 0.5 * (a[k] + b[k]) for k in a}
-    else:
+    if pol not in ("s", "p", "u"):
         raise ValueError("pol must be 's', 'p' or 'u'")
+    if n_exit is None:
+        s0 = n_inc * np.sin(th)
+
+        def one(p):
+            return _one_pol(lam, t, n, n_inc, n_sub, s0, p)
+    else:
+        from .tmm import _thick_substrate_media
+        n_inc, ns, ne, s0 = _thick_substrate_media(lam, n_inc, n_sub,
+                                                  n_exit, th)
+
+        def one(p):
+            return _thick_one_pol(lam, t, n, n_inc, ns, ne, s0, p)
+    if pol in ("s", "p"):
+        out = one(pol)
+    else:
+        a = one("s")
+        b = one("p")
+        out = {k: 0.5 * (a[k] + b[k]) for k in a}
     out["A"] = 1.0 - out["R"] - out["T"]
     for p in ("t", "n", "k"):
         out[f"dA_d{p}"] = -out[f"dR_d{p}"] - out[f"dT_d{p}"]

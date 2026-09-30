@@ -22,8 +22,9 @@ from .tmm import (bandpass_weights, merit, notch_weights, reflectance,
 from .adjoint import merit_and_grad, transmittance_and_grads
 from .process import PAPER_PROCESS, DepositionProcess
 from .twins import GaussianTwin, apply_errors, errors_from_traces
-from .risk import (cvar, evaluate_under_process, pass_fail,
-                   tail_statistics, yield_fraction)
+from .risk import (cvar, cvar_difference, cvar_interval,
+                   evaluate_under_process, pass_fail, tail_statistics,
+                   yield_fraction, yield_interval)
 from .design import DesignBox, adam_ascent, inverse_design, random_search
 from .robust import (TwinEnsemble, cvar_objective_and_grad,
                      robustify, ru_objective_and_grad)
@@ -43,7 +44,7 @@ from .merits import (FunctionMerit, LinearMerit, OpticalModel,
                      model_spectra)
 from .correct import reoptimize_remaining
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",
@@ -73,4 +74,6 @@ __all__ = [
     "energy_distance", "drift_test", "novelty_pvalues",
     "mondrian_quantiles", "AdaptiveConformal",
     "maximin_distance", "reoptimize_remaining",
+    # new in 0.8.0
+    "yield_interval", "cvar_interval", "cvar_difference",
 ]
