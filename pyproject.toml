@@ -20,7 +20,8 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/TaN-MM-Org/fabtwin"
-Paper = "https://github.com/Tanvir-Mahmud-Mahim/Learned-generative-process-twins-for-yield-aware-inverse-design-of-multilayer-photonic-sensor"
+Paper = "https://doi.org/10.1109/JSEN.2026.3732239"
+"Paper code" = "https://github.com/Tanvir-Mahmud-Mahim/Learned-generative-process-twins-for-yield-aware-inverse-design-of-multilayer-photonic-sensor"
 
 [project.optional-dependencies]
 twin = ["jax>=0.4.30", "optax>=0.2"]

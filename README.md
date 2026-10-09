@@ -49,7 +49,9 @@ The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
 (the "adjoint"), so the core runs on NumPy and SciPy alone. It is the
 generalized library form of the FabGAN-ID framework (Mahim, Islam,
-Rahman and Mohsin, *IEEE Sensors Journal*, 2026). An optional extra
+Rahman and Mohsin, *IEEE Sensors Journal*, 2026,
+[doi:10.1109/JSEN.2026.3732239](https://doi.org/10.1109/JSEN.2026.3732239)).
+An optional extra
 adds the paper's learned generative error model (a conditional
 WGAN-GP) in JAX. The guiding rule, from the paper:
 
@@ -1751,15 +1753,30 @@ the trace-file interface is meant for that.
 
 T. M. Mahim, M. N. Islam, M. M. Rahman, A. S. M. Mohsin, "FabGAN-ID:
 Learning the Fabrication Process for Yield-Aware Inverse Design of
-Multilayer Photonic Sensor Filters", *IEEE Sensors Journal* (2026).
-Companion repository:
+Multilayer Photonic Sensor Filters", *IEEE Sensors Journal*, early
+access, published online 8 October 2026,
+[doi:10.1109/JSEN.2026.3732239](https://doi.org/10.1109/JSEN.2026.3732239).
+Volume and page numbers are not yet assigned. Companion repository:
 [Learned-generative-process-twins...](https://github.com/Tanvir-Mahmud-Mahim/Learned-generative-process-twins-for-yield-aware-inverse-design-of-multilayer-photonic-sensor)
 (benchmark archived on Zenodo, doi:10.5281/zenodo.21315793).
 
 ## Citing, support and license
 
 If `fabtwin` helps your work, please cite it together with the
-associated paper above. Every release is archived on Zenodo under the
+associated paper above. In BibTeX:
+
+```bibtex
+@article{mahim2026fabganid,
+  author  = {Mahim, Tanvir M. and Islam, Md Nahin and Rahman, M. Mosaddequr and Mohsin, Abu S. M.},
+  title   = {{FabGAN-ID}: Learning the Fabrication Process for Yield-Aware Inverse Design of Multilayer Photonic Sensor Filters},
+  journal = {IEEE Sensors Journal},
+  year    = {2026},
+  note    = {Early access},
+  doi     = {10.1109/JSEN.2026.3732239}
+}
+```
+
+Every release is archived on Zenodo under the
 concept DOI
 [10.5281/zenodo.22697049](https://doi.org/10.5281/zenodo.22697049),
 which always resolves to the latest version.

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Documentation: the associated paper is published (IEEE Sensors
+  Journal, early access, 8 October 2026,
+  doi:10.1109/JSEN.2026.3732239). `README.md` and `CITATION.cff` now
+  cite it with its DOI, and the README gives a BibTeX entry. The
+  `Paper` link in `pyproject.toml` now points to the DOI; the
+  companion repository is listed as `Paper code`. No code changes.
+
 ## 0.8.0 (2026-09-30)
 
 Measured coated plates (the substrate's back face), warnings when a
