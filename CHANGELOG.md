@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.1 (2026-10-10)
+
+Citation corrections and packaging.
+
+### Fixed (documentation)
+
+- `reverse.py`: Appl. Opt. 51, 245 (2012) has eight authors and is now
+  cited as "A. V. Tikhonravov et al." (it was "Tikhonravov and
+  Trubetskov"), in the module docstring and in two error messages. The
+  author list of Appl. Opt. 51, 5543 (2012) now includes B. Romanov.
+- `risk.py`: the North American Actuarial Journal 9(2), 129 (2005)
+  paper is by Manistre and Hancock, in that order.
+- Packaging: the license is now given as the SPDX expression
+  `license = "Apache-2.0"` with `license-files = ["LICENSE"]`, and the
+  old license table and license classifier are gone. Building no longer
+  prints setuptools' deprecation warnings (their support ends on
+  2027-02-18). Building from source now needs setuptools 77 or newer;
+  installing the package is unchanged.
+
 ## 0.9.0 (2026-10-10)
 
 Measured spectra from instrument files, measurement planning before
