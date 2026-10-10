@@ -218,8 +218,26 @@ def _thick_rt(lam_um, t_um, n_layers, n_inc, n_sub, n_exit, theta0_rad,
     return Rf + Tf * Tr * Rb / den, Tf * Tb / den
 
 
+def _check_angle(theta0_rad):
+    """Refuse an angle of incidence that is not a finite number in
+    [-pi/2, pi/2] (new in 0.9.0). Beyond pi/2 the light would arrive
+    from behind; 0.8.0 silently returned the result for pi - theta."""
+    try:
+        th = float(theta0_rad)
+    except (TypeError, ValueError):
+        raise ValueError("theta0_rad must be one real number (radians)") \
+            from None
+    if not np.isfinite(th) or abs(th) > np.pi / 2:
+        raise ValueError(
+            f"theta0_rad = {theta0_rad!r} is not an angle of incidence: it "
+            "must be finite and at most pi/2 in size (radians, not "
+            "degrees; use np.deg2rad)")
+    return th
+
+
 def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-             theta0_rad=0.0, pol="s", n_exit=None):
+             theta0_rad: float = 0.0, pol: str = "s",
+             n_exit=None) -> tuple:
     """Reflectance and transmittance (R, T) of the stack. pol is "s",
     "p" or (new in 0.7.0) "u", unpolarized light: the mean of s and p.
 
@@ -240,7 +258,11 @@ def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     coating seen from inside the substrate, and Rb, Tb the back face.
     Unpolarized light is summed per polarization first. The
     incidence medium, substrate and exit medium must be lossless.
+
+    theta0_rad must be finite and at most pi/2 in size (new check in
+    0.9.0).
     """
+    _check_angle(theta0_rad)
     if pol == "u":
         Rs, Ts = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
                           theta0_rad, "s", n_exit)
@@ -257,14 +279,14 @@ def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
 
 
 def transmittance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                  theta0_rad=0.0, pol="s", n_exit=None):
+                  theta0_rad: float = 0.0, pol: str = "s", n_exit=None):
     """Intensity transmittance T(lam) (n_exit: see `stack_rt`)."""
     return stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
                     theta0_rad, pol, n_exit)[1]
 
 
 def reflectance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                theta0_rad=0.0, pol="s", n_exit=None):
+                theta0_rad: float = 0.0, pol: str = "s", n_exit=None):
     """Intensity reflectance R(lam) (n_exit: see `stack_rt`)."""
     return stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
                     theta0_rad, pol, n_exit)[0]
@@ -273,14 +295,24 @@ def reflectance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
 # ------------------------- linear merits --------------------------
 
 
-def notch_weights(lam_um, center_um, half_um, guard_um):
+def _check_band_args(**kw):
+    for name, v in kw.items():
+        if not (np.isfinite(float(v)) and float(v) >= 0.0):
+            raise ValueError(f"{name} must be finite and >= 0; got {v!r} "
+                             "(a negative width makes the bands overlap)")
+
+
+def notch_weights(lam_um, center_um: float, half_um: float,
+                  guard_um: float):
     """Weights (w, const) of the fluorescence-rejection notch merit
 
         J = 0.5 * mean_pass T + 0.5 * mean_stop (1 - T) = w . T + const
 
     with stop band [c-h, c+h] and pass bands outside the guard
     [c-h-g, c+h+g] (Mahim et al., IEEE Sensors J., 2026, Eq. 2).
+    half_um and guard_um must be >= 0 (checked since 0.9.0).
     """
+    _check_band_args(half_um=half_um, guard_um=guard_um)
     lam = np.asarray(lam_um, dtype=float)
     stop = (lam >= center_um - half_um) & (lam <= center_um + half_um)
     pas = (lam <= center_um - half_um - guard_um) | \
@@ -292,10 +324,11 @@ def notch_weights(lam_um, center_um, half_um, guard_um):
     return w, 0.5
 
 
-def bandpass_weights(lam_um, lo_um, hi_um, guard_um):
+def bandpass_weights(lam_um, lo_um: float, hi_um: float, guard_um: float):
     """Weights of the dual bandpass merit: J = 0.5 mean_in T
     + 0.5 mean_out (1 - T), pass band [lo, hi], rejection outside the
-    guard."""
+    guard. guard_um must be >= 0 (checked since 0.9.0)."""
+    _check_band_args(guard_um=guard_um)
     lam = np.asarray(lam_um, dtype=float)
     inside = (lam >= lo_um) & (lam <= hi_um)
     outside = (lam <= lo_um - guard_um) | (lam >= hi_um + guard_um)

@@ -3,7 +3,10 @@
 CVaR convention (Rockafellar and Uryasev, J. Risk 2, 21 (2000), lower
 tail): CVaR_alpha is the mean of the q = ceil(alpha K) smallest merit
 samples -- exactly, by sorting, with no interpolation, so the tests
-can anchor it on hand-computable sets. `tail_statistics` bundles the
+can anchor it on hand-computable sets. (Since 0.9.0 the count
+ceil(alpha K) is computed without floating-point round-off: 0.8.0
+averaged 8 values for alpha = 0.07, K = 100, because 0.07 * 100 is
+7.000000000000001 in floating point.) `tail_statistics` bundles the
 mean, std, lower percentile and CVaR of a merit sample; `pass_fail`
 evaluates the hard spec of the FabGAN-ID study (worst-case in-band
 leakage below a ceiling AND mean pass-band transmission above a
@@ -30,18 +33,36 @@ __all__ = ["cvar", "tail_statistics", "pass_fail", "yield_fraction",
            "cvar_difference"]
 
 
-def cvar(values, alpha):
+def _ceil_count(x: float) -> int:
+    """ceil(x) for a count such as alpha * K or (n + 1) * (1 - alpha),
+    without the floating-point round-off that pushes an exact whole
+    number just above itself (0.07 * 100 is 7.000000000000001 in
+    binary floating point, so np.ceil gives 8, not 7). A product within
+    1e-9 (relative) of a whole number is taken to be that number; the
+    round-off of one multiplication is about 1e-16 relative, and a
+    product that is genuinely not whole (alpha with up to about 9
+    decimals, K below about 1e6) differs from the nearest whole number
+    by far more. (New in 0.9.0; 0.8.0 and earlier used np.ceil
+    directly; see the 0.9.0 changelog.)"""
+    x = float(x)
+    r = round(x)
+    if abs(x - r) <= 1e-9 * max(1.0, abs(x)):
+        return int(r)
+    return int(np.ceil(x))
+
+
+def cvar(values, alpha: float) -> float:
     """Lower-tail CVaR: mean of the ceil(alpha K) smallest values."""
     v = np.asarray(values, dtype=float).ravel()
     if v.size == 0:
         raise ValueError("need at least one sample")
     if not (0.0 < alpha <= 1.0):
-        raise ValueError("alpha must lie in (0, 1]")
-    q = max(1, int(np.ceil(alpha * v.size)))
+        raise ValueError(f"alpha must lie in (0, 1]; got {alpha!r}")
+    q = max(1, _ceil_count(alpha * v.size))
     return float(np.sort(v)[:q].mean())
 
 
-def tail_statistics(values, alpha=0.05):
+def tail_statistics(values, alpha: float = 0.05) -> dict:
     """dict(mean, std, P (100*alpha percentile), CVaR) of a merit
     sample."""
     v = np.asarray(values, dtype=float).ravel()
@@ -119,18 +140,19 @@ def _cvar_influence(values, alpha, min_tail):
         raise ValueError("need at least 2 finite merit values")
     if not (0.0 < alpha < 1.0):
         raise ValueError("alpha must lie in (0, 1)")
-    q = max(1, int(np.ceil(alpha * v.size)))
+    q = max(1, _ceil_count(alpha * v.size))
     if q < int(min_tail):
         raise ValueError(
             f"only {q} value(s) in the worst {100 * alpha:g} %: the "
             f"large-sample standard error needs at least {int(min_tail)} "
-            f"(min_tail); use at least {int(np.ceil(min_tail / alpha))} "
+            f"(min_tail); use at least {_ceil_count(min_tail / alpha)} "
             "draws")
     tau = np.sort(v)[q - 1]
     return tau - np.maximum(tau - v, 0.0) / alpha
 
 
-def cvar_interval(values, alpha, confidence=0.95, min_tail=20):
+def cvar_interval(values, alpha: float, confidence: float = 0.95,
+                  min_tail: int = 20) -> dict:
     """CVaR of a merit sample with its standard error and a
     large-sample confidence interval (new in 0.8.0).
 
@@ -173,7 +195,7 @@ def cvar_interval(values, alpha, confidence=0.95, min_tail=20):
     se = float(np.std(psi, ddof=1) / np.sqrt(K))
     z = float(norm.ppf(0.5 + c / 2.0))
     return dict(CVaR=est, se=se, lo=est - z * se, hi=est + z * se,
-                n_tail=max(1, int(np.ceil(alpha * K))), confidence=c)
+                n_tail=max(1, _ceil_count(alpha * K)), confidence=c)
 
 
 def cvar_difference(values, baseline, alpha, confidence=0.95,

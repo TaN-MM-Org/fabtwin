@@ -29,6 +29,8 @@ import dataclasses
 
 import numpy as np
 
+from .risk import _ceil_count
+
 try:
     import jax
     import jax.numpy as jnp
@@ -350,7 +352,7 @@ def robustify_gan(cfg, gp, lam, t0, n00, shape, weights, const, n_sub,
         J = merit_b(tt, nn)
         if mean_variance:
             return jnp.mean(J) - beta * jnp.std(J)
-        q = max(1, int(np.ceil(alpha * K)))
+        q = max(1, _ceil_count(alpha * K))
         return jnp.mean(jnp.sort(J)[:q])
 
     vg = jax.jit(jax.value_and_grad(obj, argnums=0))

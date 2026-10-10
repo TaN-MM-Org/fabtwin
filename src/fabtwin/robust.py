@@ -69,6 +69,7 @@ import numpy as np
 
 from . import adjoint, tmm
 from .merits import model_merit_and_grad
+from .risk import _ceil_count
 from .twins import GaussianTwin
 
 __all__ = ["cvar_objective_and_grad", "robustify", "TwinEnsemble",
@@ -202,7 +203,7 @@ def cvar_objective_and_grad(lam, t, n0, S, w, const, twin, z, alpha, box,
             wgt = wgt - beta * (J - Jbar) / (K * sd)
         val = Jbar - beta * sd
     else:
-        q = max(1, int(np.ceil(alpha * K)))
+        q = max(1, _ceil_count(alpha * K))
         tail = np.argsort(J)[:q]
         wgt = np.zeros(K)
         wgt[tail] = 1.0 / q

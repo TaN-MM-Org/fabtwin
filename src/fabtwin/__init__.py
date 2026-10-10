@@ -28,9 +28,11 @@ from .risk import (cvar, cvar_difference, cvar_interval,
 from .design import DesignBox, adam_ascent, inverse_design, random_search
 from .robust import (TwinEnsemble, cvar_objective_and_grad,
                      robustify, ru_objective_and_grad)
-from .data import load_traces_csv, save_traces_csv, validate_traces
-from .reverse import (JointRecovery, Measurement, SpectrumRecovery,
-                      errors_from_spectra, errors_from_spectrum)
+from .data import (load_spectrum_csv, load_traces_csv, save_traces_csv,
+                   validate_traces)
+from .reverse import (JointRecovery, Measurement, RecoveryPlan,
+                      SpectrumRecovery, errors_from_spectra,
+                      errors_from_spectrum, recovery_precision)
 from .lab import design_recipes, maximin_distance, runs_for_twin_mean
 from .conformal import (AdaptiveConformal, conformal_coverage_exact,
                         conformal_interval, conformal_quantile,
@@ -44,7 +46,7 @@ from .merits import (FunctionMerit, LinearMerit, OpticalModel,
                      model_spectra)
 from .correct import reoptimize_remaining
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",
@@ -76,4 +78,6 @@ __all__ = [
     "maximin_distance", "reoptimize_remaining",
     # new in 0.8.0
     "yield_interval", "cvar_interval", "cvar_difference",
+    # new in 0.9.0
+    "load_spectrum_csv", "recovery_precision", "RecoveryPlan",
 ]

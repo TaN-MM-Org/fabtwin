@@ -17,7 +17,11 @@ Springer (2005); J. Lei et al., J. Am. Stat. Assoc. 113, 1094
 (2018); A. N. Angelopoulos and S. Bates, arXiv:2107.07511). For
 continuous scores the coverage is also at most 1 - alpha + 1/(n+1),
 with the exact value ceil((n+1)(1-alpha))/(n+1) -- a rank statement
-the tests verify by seeded simulation against the closed form.
+the tests verify by seeded simulation against the closed form. (Since
+0.9.0 the rank is computed without floating-point round-off; 0.8.0
+took one rank too many when (n+1)(1-alpha) was a whole number that
+floating point represents slightly above itself, for example
+n = 149, alpha = 0.18.)
 
 This is the honest companion to `twin_fidelity_report`: the report
 grades how well the twin matches held-out data in distribution; the
@@ -34,12 +38,14 @@ from __future__ import annotations
 
 import numpy as np
 
+from .risk import _ceil_count
+
 __all__ = ["conformal_quantile", "conformal_interval",
            "conformal_coverage_exact", "mondrian_quantiles",
            "AdaptiveConformal"]
 
 
-def conformal_quantile(scores, alpha=0.1):
+def conformal_quantile(scores, alpha: float = 0.1) -> float:
     """The split-conformal quantile of held-out error scores.
 
     scores : (n,) nonnegative held-out error scores (e.g.
@@ -57,9 +63,9 @@ def conformal_quantile(scores, alpha=0.1):
     if not (0.0 < a < 1.0):
         raise ValueError("alpha must lie in (0, 1)")
     n = s.size
-    k = int(np.ceil((n + 1) * (1.0 - a)))
+    k = _ceil_count((n + 1) * (1.0 - a))
     if k > n:
-        need = int(np.ceil((1.0 - a) / a))
+        need = _ceil_count((1.0 - a) / a)
         raise ValueError(
             f"{n} held-out scores cannot certify level {1 - a:.3g}: "
             f"the required rank {k} exceeds n. Hold out at least "
@@ -76,7 +82,7 @@ def conformal_interval(prediction, q):
     return pred - qv, pred + qv
 
 
-def conformal_coverage_exact(n, alpha):
+def conformal_coverage_exact(n: int, alpha: float) -> float:
     """The exact marginal coverage for continuous scores:
     ceil((n+1)(1-alpha)) / (n+1), always inside
     [1-alpha, 1-alpha + 1/(n+1)]."""
@@ -84,7 +90,7 @@ def conformal_coverage_exact(n, alpha):
     a = float(alpha)
     if n < 1 or not (0.0 < a < 1.0):
         raise ValueError("need n >= 1 and alpha in (0, 1)")
-    k = int(np.ceil((n + 1) * (1.0 - a)))
+    k = _ceil_count((n + 1) * (1.0 - a))
     if k > n:
         raise ValueError("level not certifiable at this n (see "
                          "conformal_quantile)")
@@ -178,7 +184,7 @@ class AdaptiveConformal:
             return -np.inf
         s = np.sort(self.scores)
         n = s.size
-        k = int(np.ceil((n + 1) * (1.0 - a)))
+        k = _ceil_count((n + 1) * (1.0 - a))
         return float(s[k - 1]) if k <= n else np.inf
 
     def update(self, score):

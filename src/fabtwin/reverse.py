@@ -46,6 +46,13 @@ back face included (see `fabtwin.tmm.stack_rt`); and both functions
 report, and warn about, errors stopped by the search box (`at_bound`)
 and fits inconsistent with the stated noise level (`chi2_pvalue`
 below 1e-6) -- results that were returned silently before.
+
+New in 0.9.0: `recovery_precision` predicts, before anything is
+measured, how precisely a planned set of measurements would determine
+each layer error (and refuses a plan that cannot determine them), so
+the angles, polarizations, R or T and noise level of a measurement can
+be chosen first. Measured spectra exported by an instrument are read by
+`fabtwin.data.load_spectrum_csv`.
 """
 from __future__ import annotations
 
@@ -59,7 +66,8 @@ from scipy.stats import chi2 as _chi2_dist
 from .adjoint import transmittance_and_grads
 
 __all__ = ["SpectrumRecovery", "errors_from_spectrum", "Measurement",
-           "JointRecovery", "errors_from_spectra"]
+           "JointRecovery", "errors_from_spectra", "RecoveryPlan",
+           "recovery_precision"]
 
 
 @dataclasses.dataclass
@@ -70,7 +78,10 @@ class SpectrumRecovery:
     t_um : (N,) the recovered absolute thicknesses.
     sigma : (N,) one-standard-deviation uncertainties of dt_over_t
     (from the exact Jacobian; scaled by the residual when sigma_T was
-    not given, exactly like a textbook least-squares fit).
+    not given, exactly like a textbook least-squares fit). NaN, with a
+    RuntimeWarning, when sigma_T was not given and dof is 0: there is
+    then no residual to estimate the noise from (new in 0.9.0; 0.8.0
+    returned the unit-weight value, as if the noise were 1 in T).
     chi2, dof : weighted residual and degrees of freedom (chi2 is
     calibrated only when sigma_T reflects the real noise).
     condition_number : of the weighted Jacobian at the solution.
@@ -119,6 +130,25 @@ def _bound_check(x, active_mask, names):
 CHI2_WARN_PVALUE = 1e-6
 
 
+def _check_search(**kw):
+    """Search-box half-widths (checked since 0.9.0; before, a zero or
+    negative half-width surfaced as "no multi-start converged")."""
+    for name, v in kw.items():
+        if not (np.isfinite(float(v)) and float(v) > 0.0):
+            raise ValueError(f"{name} must be finite and > 0; got {v!r}")
+
+
+def _no_noise_warning():
+    """sigma is NaN: no noise level given and no residual to estimate
+    one from (as many measured values as unknowns; new in 0.9.0)."""
+    warnings.warn(
+        "no noise level was given and there are as many measured values "
+        "as unknowns (0 degrees of freedom), so the noise cannot be "
+        "estimated from the residual: the uncertainties are returned as "
+        "NaN. Give the noise level (sigma_T, or Measurement.sigma) or "
+        "measure more points", RuntimeWarning, stacklevel=3)
+
+
 def _chi2_pvalue(chi2, dof, have_sigma):
     """Chi-square upper-tail probability, with a warning when the fit is
     statistically inconsistent with the stated noise level."""
@@ -140,7 +170,7 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
                          n_inc=1.0, n_sub=1.0, sigma_T=None,
                          max_error=0.10, n_starts=8, seed=0,
                          chi2_rtol=1e-3, distinct_atol=1e-4,
-                         n_exit=None):
+                         n_exit=None) -> SpectrumRecovery:
     """Per-layer relative thickness errors from one measured T(lam).
 
     lam_um, T_meas : the measured spectrum (transmittance in [0, 1]).
@@ -173,6 +203,7 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
         raise ValueError("lam_um and T_meas must be matching 1D arrays")
     if np.any(t0 <= 0):
         raise ValueError("recipe thicknesses must be positive")
+    _check_search(max_error=max_error)
     N, L = t0.size, lam.size
     if L < N:
         raise ValueError(
@@ -259,6 +290,9 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     dof = L - N
     if sigma_T is None and dof > 0:
         cov = cov * (chi2_best / dof)            # residual-scaled
+    elif sigma_T is None:
+        cov = cov * np.nan                       # no noise estimate (0.9.0)
+        _no_noise_warning()
     at = _bound_check(x_best, active,
                       [f"layer {i + 1} thickness error" for i in range(N)])
     return SpectrumRecovery(
@@ -278,10 +312,11 @@ class Measurement:
     """One measured spectrum on the common wavelength grid.
 
     theta0_rad : angle of incidence; pol : "s", "p" or "u";
-    quantity : "T" or "R"; values : (L,) measured powers in [0, 1];
+    quantity : "T" or "R"; values : (L,) measured powers in [0, 1]
+    (None in a plan for `recovery_precision`, which ignores them);
     sigma : scalar or (L,) one-standard-deviation noise (None: unit
     weights and a residual-scaled uncertainty, as in
-    `errors_from_spectrum`).
+    `errors_from_spectrum`; required by `recovery_precision`).
     """
 
     theta0_rad: float
@@ -300,6 +335,9 @@ class JointRecovery:
     t_um, n0 : the recovered stack; sigma_t, sigma_n : linear
     (Jacobian) one-sigma uncertainties; boot_sigma_t, boot_sigma_n :
     the same from a parametric bootstrap (None unless requested);
+    sigma_t, sigma_n are NaN, with a RuntimeWarning, when no
+    Measurement has a sigma and dof is 0 (new in 0.9.0; see
+    `SpectrumRecovery.sigma`);
     chi2, dof, condition_number, n_converged, chi2_pvalue as in
     `SpectrumRecovery`; at_bound_t, at_bound_n : (N,) bool, True where
     that error sits on the search bound (new in 0.8.0; a RuntimeWarning
@@ -327,7 +365,8 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
                         fit_index=False, kext=None, n_inc=1.0, n_sub=1.0,
                         max_error=0.10, max_index_error=0.10, n_starts=8,
                         seed=0, chi2_rtol=1e-3, distinct_atol=1e-4,
-                        cond_max=1e10, n_boot=0, n_exit=None):
+                        cond_max=1e10, n_boot=0,
+                        n_exit=None) -> JointRecovery:
     """Per-layer thickness errors -- and, if asked, index errors -- from
     one or SEVERAL measured spectra (new in 0.7.0).
 
@@ -370,6 +409,7 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         raise ValueError("lam_um must be 1-D")
     if np.any(t0 <= 0):
         raise ValueError("recipe thicknesses must be positive")
+    _check_search(max_error=max_error, max_index_error=max_index_error)
     N, L = t0.size, lam.size
     meas = list(measurements)
     if not meas:
@@ -497,6 +537,17 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
     if not have_sigma and dof > 0:
         scale = chi2_best / dof
         cov = cov * scale
+    elif not have_sigma:
+        # no noise level and no residual to estimate one from (0.9.0;
+        # 0.8.0 returned the unit-weight values, i.e. sigma = 1 in T)
+        if int(n_boot) > 0:
+            raise ValueError(
+                "the parametric bootstrap needs a noise level: give "
+                "Measurement.sigma, or more measured values than unknowns "
+                "so it can be estimated from the residual")
+        scale = np.nan
+        cov = cov * scale
+        _no_noise_warning()
     sd = np.sqrt(np.diag(cov))
     sig_n = np.zeros(N)
     sig_n[mask] = sd[N:]
@@ -540,3 +591,179 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         dof=dof, condition_number=float(cond), n_converged=len(sols),
         at_bound_t=at[:N], at_bound_n=at_n,
         chi2_pvalue=_chi2_pvalue(chi2_best, dof, have_sigma))
+
+
+# ----------------------------------------------------------------------
+# Plan a measurement before making it (new in 0.9.0)
+
+
+@dataclasses.dataclass
+class RecoveryPlan:
+    """How precisely a planned set of measurements would determine the
+    layer errors (from `recovery_precision`).
+
+    sigma_t : (N,) predicted one-standard-deviation uncertainty of each
+        relative thickness error; sigma_n : (N,) the same for each
+        absolute index error at the reference wavelength (0 where the
+        index is not fitted).
+    covariance, correlation : (P, P) for the P unknowns, in the order
+        of `names` (every thickness error, then the fitted index errors).
+    names : the unknowns, e.g. "layer 1 thickness error".
+    condition_number : of the noise-weighted Jacobian (the refusal
+        threshold of the recovery functions is 1e10).
+    n_values, n_unknowns : measured values planned, and unknowns.
+    """
+
+    sigma_t: np.ndarray
+    sigma_n: np.ndarray
+    covariance: np.ndarray
+    correlation: np.ndarray
+    names: list
+    condition_number: float
+    n_values: int
+    n_unknowns: int
+
+
+def recovery_precision(lam_um, measurements, recipe_t_um, n0, shape,
+                       fit_index=False, kext=None, n_inc=1.0, n_sub=1.0,
+                       n_exit=None, at_dt_over_t=None, at_dn=None,
+                       cond_max: float = 1e10) -> RecoveryPlan:
+    """Predicted uncertainties of the layer errors that a planned set of
+    measurements would give, BEFORE measuring (new in 0.9.0).
+
+    Use it to choose a measurement: which angles, polarizations, R or
+    T, wavelength range or noise level pin down which layers, and
+    whether index errors can be fitted at all. Nothing is measured or
+    fitted here; the numbers come from the exact Jacobian of the
+    planned spectra.
+
+    lam_um, recipe_t_um, n0, shape, fit_index, kext, n_inc, n_sub,
+    n_exit : as in `errors_from_spectra`.
+    measurements : list of `Measurement` describing the plan. Their
+        `values` are ignored (pass None); each `sigma` (scalar or (L,),
+        the expected one-standard-deviation noise) is REQUIRED, because
+        the predicted uncertainty is proportional to it.
+    at_dt_over_t, at_dn : (N,) errors at which to evaluate the
+        prediction (default: zero, the recipe itself). The prediction
+        depends on them only weakly for small errors.
+    cond_max : the same refusal threshold as `errors_from_spectra`.
+
+    Method. With J the Jacobian of all planned values with respect to
+    the unknowns (relative thickness errors, then the fitted index
+    errors) and W = diag(1 / sigma^2), the predicted covariance is
+
+        C = (J^T W J)^-1,
+
+    the inverse Fisher information of the unknowns for independent
+    Gaussian noise of the stated size: the smallest covariance any
+    unbiased estimator can reach (the Cramer-Rao bound; C. R. Rao,
+    Bull. Calcutta Math. Soc. 37, 81 (1945)), and, to first order in
+    the noise, the covariance that `errors_from_spectrum` and
+    `errors_from_spectra` report after the fit (their `sigma`,
+    `sigma_t`, `sigma_n`). The tests check it against the scatter of
+    actual fits to simulated noisy spectra.
+
+    What it does not include: errors of the model itself (a wrong
+    substrate index, dispersion, a back face left out), drift or
+    calibration errors of the instrument, and the multiple solutions a
+    fit can find far from the truth. A small predicted sigma is
+    necessary for a reliable recovery, not sufficient.
+
+    Raises ValueError, like the recovery functions, when the plan has
+    fewer values than unknowns or cannot determine some combination of
+    them (condition number above `cond_max`); the message names the
+    unknowns in the worst-determined combination.
+    """
+    from .gradients import layer_indices, stack_rta_and_grads
+    lam = np.asarray(lam_um, dtype=float)
+    t0 = np.asarray(recipe_t_um, dtype=float)
+    n0 = np.asarray(n0, dtype=float)
+    if lam.ndim != 1 or t0.ndim != 1 or n0.shape != t0.shape:
+        raise ValueError("lam_um must be 1-D, and recipe_t_um and n0 "
+                         "(N,) arrays of the same length")
+    if np.any(t0 <= 0):
+        raise ValueError("recipe thicknesses must be positive")
+    N, L = t0.size, lam.size
+    S = np.asarray(shape, dtype=float)
+    if S.ndim == 1:
+        S = np.broadcast_to(S[None, :], (N, L))
+    if S.shape != (N, L):
+        raise ValueError("shape must be (L,) or (N, L)")
+    if fit_index is True:
+        mask = np.ones(N, bool)
+    elif fit_index is False or fit_index is None:
+        mask = np.zeros(N, bool)
+    else:
+        mask = np.asarray(fit_index, bool)
+        if mask.shape != (N,):
+            raise ValueError("fit_index mask must have one entry per "
+                             "layer")
+    meas = list(measurements)
+    if not meas:
+        raise ValueError("give at least one Measurement")
+    Wt = []
+    for k, m in enumerate(meas):
+        if m.quantity not in ("T", "R"):
+            raise ValueError("Measurement.quantity must be 'T' or 'R'")
+        if m.pol not in ("s", "p", "u"):
+            raise ValueError("Measurement.pol must be 's', 'p' or 'u'")
+        if m.sigma is None:
+            raise ValueError(
+                f"measurement {k}: give its expected noise level (sigma); "
+                "the predicted uncertainty is proportional to it")
+        sig = np.broadcast_to(np.asarray(m.sigma, dtype=float), (L,))
+        if not np.all(np.isfinite(sig)) or np.any(sig <= 0):
+            raise ValueError("sigma must be positive and finite")
+        Wt.append(1.0 / sig)
+    Wt = np.concatenate(Wt)
+    nf = int(mask.sum())
+    P = N + nf
+    if Wt.size < P:
+        raise ValueError(
+            f"{Wt.size} planned values cannot determine {P} unknowns: the "
+            "problem is underdetermined before noise even enters")
+    xt = np.zeros(N) if at_dt_over_t is None else \
+        np.asarray(at_dt_over_t, dtype=float)
+    dn = np.zeros(N) if at_dn is None else np.asarray(at_dn, dtype=float)
+    if xt.shape != (N,) or dn.shape != (N,) or \
+            not np.all(np.isfinite(xt)) or not np.all(np.isfinite(dn)):
+        raise ValueError("at_dt_over_t and at_dn must be finite (N,) "
+                         "arrays")
+    if np.any(xt <= -1.0):
+        raise ValueError("at_dt_over_t must be > -1 (positive "
+                         "thicknesses)")
+    n = layer_indices(n0 + dn, S, kext)
+    t = t0 * (1.0 + xt)
+    rows = []
+    for m in meas:
+        g = stack_rta_and_grads(lam, t, n, n_inc, n_sub, m.theta0_rad,
+                                m.pol, n_exit=n_exit)
+        q = m.quantity
+        Jt = (g[f"d{q}_dt"] * t0[:, None]).T                  # (L, N)
+        Jn = (g[f"d{q}_dn"] * S).T[:, mask]                   # (L, nf)
+        rows.append(np.hstack([Jt, Jn]))
+    J = np.vstack(rows) * Wt[:, None]
+    names = [f"layer {i + 1} thickness error" for i in range(N)] + \
+        [f"layer {i + 1} index error" for i in np.nonzero(mask)[0]]
+    _, sv, Vt = np.linalg.svd(J, full_matrices=False)
+    cond = sv[0] / max(sv[-1], np.finfo(float).tiny)
+    if sv[-1] == 0.0 or cond > cond_max:
+        v = Vt[-1]
+        top = np.argsort(np.abs(v))[::-1][:3]
+        v = v * np.sign(v[top[0]])          # largest entry positive
+        combo = " ".join(f"{v[i]:+.2f} ({names[i]})" for i in top
+                         if abs(v[i]) >= 0.05)
+        raise ValueError(
+            f"this plan cannot determine the unknowns (condition number "
+            f"{cond:.3g}): the combination {combo} barely changes the "
+            "planned spectra. Add measurements (angles, polarizations, R "
+            "and T, a wider wavelength range) or fit fewer unknowns")
+    cov = np.linalg.inv(J.T @ J)
+    cov = 0.5 * (cov + cov.T)
+    sd = np.sqrt(np.diag(cov))
+    sig_n = np.zeros(N)
+    sig_n[mask] = sd[N:]
+    return RecoveryPlan(sigma_t=sd[:N], sigma_n=sig_n, covariance=cov,
+                        correlation=cov / np.outer(sd, sd), names=names,
+                        condition_number=float(cond), n_values=int(Wt.size),
+                        n_unknowns=int(P))
