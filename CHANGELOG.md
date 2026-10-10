@@ -1,13 +1,113 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 (2026-10-10)
 
+Measured spectra from instrument files, measurement planning before
+tool time is booked, two bug fixes, and the published paper.
+
+### Added
+
+- `load_spectrum_csv(path, wavelength_unit, value_unit, column=1,
+  delimiter=None)` (`fabtwin.data`): reads a measured spectrum from a
+  spectrophotometer's text export (header lines skipped, a trailing
+  metadata block ignored, a scan from long to short wavelengths
+  reversed; comma, semicolon, tab or space between columns) and
+  returns wavelengths in micrometers and values as fractions. The
+  units are required arguments, never guessed. Refused, with the line
+  number: repeated or out-of-order wavelengths, ragged rows, numbers
+  resuming after the data block was interrupted, non-finite values,
+  decimal commas, a missing column, and units that contradict the
+  numbers (fractions above 1.5, wavelengths in um above 100 or in nm
+  below 20).
+- `recovery_precision(...)` -> `RecoveryPlan` (`fabtwin.reverse`):
+  the uncertainties of the thickness (and index) errors that a planned
+  set of measurements would give, before measuring, from the inverse
+  Fisher information `(J^T W J)^-1` of the exact Jacobian (the
+  Cramer-Rao bound for independent Gaussian noise; C. R. Rao, Bull.
+  Calcutta Math. Soc. 37, 81 (1945)), with correlations and the
+  condition number. A plan that cannot determine the unknowns is
+  refused, and the message names the invisible combination.
+  `Measurement.values` may be None in a plan.
+- README examples 19 (reading an instrument export and fitting it) and
+  20 (comparing measurement plans).
+
+### Fixed
+
+- Tail counts and conformal ranks off by one through floating-point
+  round-off. `ceil(alpha K)` (CVaR) and `ceil((n + 1)(1 - alpha))`
+  (conformal rank) were computed with `np.ceil` on a floating-point
+  product that can land just above a whole number (`0.07 * 100` is
+  `7.000000000000001`), giving one value too many. Before -> after:
+  `cvar(np.arange(100.0), 0.07)` 3.5 -> 3.0 (the mean of the 7
+  smallest); `cvar_interval` on 400 draws at `alpha = 0.07`, `n_tail`
+  29 -> 28; `cvar_objective_and_grad` with `alpha = 0.07`, `K = 100`
+  averaged the 8 worst draws, now the 7 worst (0.512112 -> 0.511929 in
+  the test case); `conformal_quantile` of the scores 1..149 at
+  `alpha = 0.18` 124 -> 123, `conformal_coverage_exact(149, 0.18)`
+  0.8267 -> 0.82, `AdaptiveConformal.half_width` 124 -> 123 on the same
+  scores. Also affected through the same count: `tail_statistics`,
+  `robustify` (`estimator="sort"`), `twin_jax.robustify_gan`,
+  `mondrian_quantiles`. For `alpha` in steps of 0.01 and `K`, `n` up
+  to 1000, 141 tail counts and 577 conformal ranks were wrong (none for
+  `alpha` = 0.05, 0.1, 0.2 or 0.25); results in all other cases, and
+  every README example, are unchanged. Cause: no tolerance for
+  round-off; now a product within 1e-9 (relative) of a whole number is
+  taken as that number (`fabtwin.risk._ceil_count`). Tests:
+  `test_lab_data.py::test_tail_count_matches_exact_rational_arithmetic`,
+  `test_cvar_counts_the_right_number_of_worst_values`,
+  `test_cvar_objective_averages_exactly_alpha_K_draws`,
+  `test_conformal_rank_is_the_exact_formula`.
+- `errors_from_spectrum` and `errors_from_spectra` without a noise
+  level and with zero degrees of freedom (as many measured values as
+  unknowns) returned unit-weight uncertainties, as if the noise were 1
+  (100 % in `T`), although the documentation says they are scaled by
+  the residual, which does not exist then. Before -> after: one layer
+  of 0.080 um and index 2.0 on a substrate of 1.5, one wavelength
+  (0.55 um), 1 % thickness error: `sigma` 7.400 -> NaN, with a
+  `RuntimeWarning`; `errors_from_spectra` the same, and with `n_boot`
+  it now refuses (the bootstrap noise was 1 in `T`). The recovered
+  errors are unchanged. Tests:
+  `test_lab_data.py::test_zero_dof_without_noise_level_gives_nan_not_unit_noise`
+  and `test_zero_dof_with_noise_level_matches_finite_difference` (with
+  a noise level, dof 0 keeps working and equals a finite-difference
+  closed form).
+
+### Changed
+
+- Input checks, for calls whose results were not meaningful: an angle
+  of incidence that is not finite or is larger than pi/2 in size is
+  refused by `stack_rt`, `transmittance` and `reflectance` (0.8.0
+  returned the result for `pi - theta`; `theta0_rad = 2.0` gave
+  R = 0.44983 for 0.1 um of index 2.0 on 1.5 at 0.5 um, the value at
+  1.1416 rad); a negative `half_um` or `guard_um` in `notch_weights`,
+  or `guard_um` in `bandpass_weights`, is refused (the bands
+  overlapped); a non-positive `max_error` or `max_index_error` in the
+  recovery functions is refused by name (it surfaced as "no multi-start
+  converged"). Negative angles still give the same result as positive
+  ones.
+- `load_traces_csv` accepts a UTF-8 byte-order mark (as spreadsheet
+  programs write) and names the line of a field that is not a number.
+- Type hints on the public functions touched in this release.
 - Documentation: the associated paper is published (IEEE Sensors
   Journal, early access, 8 October 2026,
-  doi:10.1109/JSEN.2026.3732239). `README.md` and `CITATION.cff` now
-  cite it with its DOI, and the README gives a BibTeX entry. The
-  `Paper` link in `pyproject.toml` now points to the DOI; the
-  companion repository is listed as `Paper code`. No code changes.
+  doi:10.1109/JSEN.2026.3732239). `README.md` and `CITATION.cff` cite
+  it with its DOI, and the README gives a BibTeX entry. The `Paper`
+  link in `pyproject.toml` points to the DOI; the companion repository
+  is listed as `Paper code`. (Released here; it was listed as
+  Unreleased after 0.8.0.)
+- README: examples 19 and 20, the new functions, refusals, checks,
+  corrections and limits; polarization `"u"` listed under units.
+
+### Tests
+
+160 tests (132 in 0.8.0), new file `test_lab_data.py` (28).
+Independent references: exact rational arithmetic (`fractions`), the
+direct mean of the smallest values, central finite differences of the
+forward solver `stack_rt` for the planner's Jacobian, the scatter of
+200 actual nonlinear fits to simulated noisy spectra (within 7 % of
+the prediction at 0.1 % noise; the test allows 20 %), and files with
+known unit conversions written by the test. The new tests add about
+4 s.
 
 ## 0.8.0 (2026-09-30)
 

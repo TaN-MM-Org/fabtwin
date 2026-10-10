@@ -44,6 +44,10 @@ It answers questions such as:
 - How sure is a yield or a worst-10 % merit computed from a few
   hundred simulated devices, and is one design really better than
   another?
+- How do I read the spectrum file my spectrophotometer wrote?
+- Before booking the instrument: which measurements (angles,
+  polarizations, `R` or `T`) would pin down each layer's error, and to
+  what precision?
 
 The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
@@ -207,7 +211,8 @@ Units and conventions:
   `merit_and_grad`) are for non-absorbing stacks at normal incidence;
   the general ones added in 0.7.0 (`stack_rta_and_grads`, and every
   function that takes `model=`) also handle absorption and any angle.
-- Angles are in radians; polarization is `"s"` or `"p"`.
+- Angles are in radians; polarization is `"s"`, `"p"` or `"u"`
+  (unpolarized).
 - Error vectors are `(relative thickness errors, absolute index
   errors)`, as defined above.
 - Merits are higher-is-better, and CVaR is taken over the **lower**
@@ -216,8 +221,9 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.8.0 (NumPy 2.4, SciPy 1.17, JAX 0.10 on
-Linux; examples 1 to 16 print exactly what they printed with 0.7.0). Wavelength ranges, stacks, error sizes and noise levels are
+printed with fabtwin 0.9.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
+0.11 on Linux). Examples 1 to 18 print exactly what they printed with
+0.8.0. Wavelength ranges, stacks, error sizes and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
 literature references. All examples except example 8 need only the
@@ -1084,6 +1090,153 @@ choice. These intervals cover only the randomness of the draws: a
 twin or process model that is wrong about the machine stays wrong
 however many draws are taken.
 
+### 19. Reading a spectrophotometer export
+
+```python
+import os, tempfile
+import numpy as np
+import fabtwin as ft
+
+# A stand-in for an instrument export: the coated plate of example 17,
+# scanned from 800 to 400 nm, written as %T with 0.2 % noise.
+lam_nm = np.arange(800.0, 399.0, -2.0)
+lam = lam_nm / 1000
+t0 = np.array([0.070, 0.095, 0.060, 0.110, 0.080])    # recipe (um)
+n0 = np.array([2.2, 1.5, 2.2, 1.5, 2.2])
+xt = np.array([0.03, -0.02, 0.015, 0.01, -0.025])     # what the tool did (unknown)
+T = ft.transmittance(lam, t0 * (1 + xt), n0[:, None] * ft.dispersion_shape(lam, 0.550),
+                     1.0, ft.SIO2_MALITSON1965.n(lam), n_exit=1.0)
+T += np.random.default_rng(7).normal(0, 2e-3, lam.size)
+path = os.path.join(tempfile.mkdtemp(), "plate_17.csv")
+with open(path, "w") as fh:
+    fh.write("Plate 17,,\nWavelength (nm),%T,\n")
+    fh.writelines(f"{a:.1f},{100 * b:.3f},\n" for a, b in zip(lam_nm, T))
+    fh.write("\nCollection Time: 10/10/2026 10:15:00\n")
+
+# Read it: the units are stated, never guessed.
+lam_m, T_m = ft.load_spectrum_csv(path, wavelength_unit="nm", value_unit="percent")
+print(f"{lam_m.size} points from {lam_m[0]:.3f} to {lam_m[-1]:.3f} um, "
+      f"T from {T_m.min():.4f} to {T_m.max():.4f}")
+S = ft.dispersion_shape(lam_m, 0.550)
+nsub = ft.SIO2_MALITSON1965.n(lam_m)
+rec = ft.errors_from_spectrum(lam_m, T_m, t0, n0, S, n_sub=nsub, sigma_T=2e-3,
+                              n_exit=1.0)
+print("recovered:", np.round(rec.dt_over_t, 4),
+      f"(chi2 {rec.chi2:.1f} for {rec.dof} degrees of freedom)")
+print("  +/-     ", np.round(rec.sigma, 4))
+print("true:     ", xt)
+
+try:
+    ft.load_spectrum_csv(path, wavelength_unit="um", value_unit="percent")
+except ValueError as err:
+    print("refused:", err)
+```
+
+```
+201 points from 0.400 to 0.800 um, T from 0.2372 to 0.9353
+recovered: [ 0.0086  0.0199 -0.0122  0.0121 -0.0218] (chi2 147.6 for 196 degrees of freedom)
+  +/-      [0.0206 0.0371 0.0246 0.0023 0.0027]
+true:      [ 0.03  -0.02   0.015  0.01  -0.025]
+refused: wavelengths from 400 um: are they in nanometers (wavelength_unit='nm')?
+```
+
+`load_spectrum_csv` reads the text table a spectrophotometer exports:
+one wavelength per row, then one or more measured columns (`column=`
+picks one; 1, the first, by default). It skips the header lines
+before the numbers and anything after the first blank or non-numeric
+line, such as the metadata block some instruments add, and it reverses
+a scan written from long to short wavelengths. It accepts commas,
+semicolons, tabs or spaces between columns. The units are required
+arguments, not guesses: `wavelength_unit` is `"nm"` or `"um"`, and
+`value_unit` is `"percent"` or `"fraction"`. It returns wavelengths in
+micrometers and values as fractions, exactly as measured. It refuses,
+naming the line where there is one, what it cannot read reliably: repeated or
+out-of-order wavelengths, rows with a different number of columns,
+rows of numbers that resume after the data block was interrupted (a
+damaged row), non-finite values, decimal commas, and units that
+contradict the numbers (as above: wavelengths of 400 um are almost
+certainly 400 nm). A file that uses the comma both between columns and
+as the decimal mark cannot be told apart from one with more columns,
+so check the result. Every recovered error here is within 1.2 of its
+error bars of the truth; layers 1 to 3 are poorly determined by this
+one spectrum, as in example 17, and example 20 shows how to plan a
+measurement that does better.
+
+### 20. Planning a measurement before making it
+
+```python
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.40, 0.90, 121)
+S = ft.dispersion_shape(lam, 0.55)
+t0 = np.array([0.070, 0.095, 0.060, 0.110, 0.080])    # the recipe of example 14
+n0 = np.array([2.2, 1.5, 2.2, 1.5, 2.2])
+
+def planned(angle_deg, pol, quantity="T", noise=0.002):   # values: not measured yet
+    return ft.Measurement(np.deg2rad(angle_deg), pol, quantity, None, noise)
+
+plans = {"T at 0 deg": [planned(0, "s")],
+         "T and R at 0 deg": [planned(0, "s"), planned(0, "s", "R")],
+         "T at 0, 45 and 60 deg": [planned(0, "s")]
+                                  + [planned(a, p) for a in (45, 60) for p in "sp"]}
+for name, ms in plans.items():
+    p = ft.recovery_precision(lam, ms, t0, n0, S, fit_index=True, n_sub=1.46)
+    worst = np.abs(p.correlation - np.eye(p.n_unknowns)).max()
+    print(f"{name}: index errors +/- {np.round(p.sigma_n, 4)}, "
+          f"largest correlation {worst:.4f}")
+
+# Two touching layers of the same index: refused before any tool time is spent
+try:
+    ft.recovery_precision(lam, plans["T at 0, 45 and 60 deg"], [0.08, 0.06, 0.10],
+                          [2.2, 2.2, 1.5], S, n_sub=1.46)
+except ValueError as err:
+    print("refused:", str(err).split("): ")[1].split(" barely")[0])
+```
+
+```
+T at 0 deg: index errors +/- [2.1639 2.2854 2.0391 0.1103 1.1027], largest correlation 1.0000
+T and R at 0 deg: index errors +/- [1.5301 1.6161 1.4419 0.078  0.7797], largest correlation 1.0000
+T at 0, 45 and 60 deg: index errors +/- [0.0024 0.002  0.0018 0.0017 0.0019], largest correlation 0.9498
+refused: the combination +0.80 (layer 2 thickness error) -0.60 (layer 1 thickness error)
+```
+
+`recovery_precision` takes the recipe and a list of planned
+measurements (`Measurement` with `values=None` and the expected noise
+level as `sigma`) and returns the uncertainty with which a fit of those
+measurements would determine each thickness error and, with
+`fit_index`, each index error, together with their correlations. No
+tool time is needed. Here one normal-incidence transmittance spectrum
+cannot separate thickness from index errors (uncertainties up to about
+2 in the index, correlations of 1.0000 to four decimals), and adding the
+reflectance at normal incidence does not help either: for a
+non-absorbing stack `R = 1 - T` carries the same information, so only
+the noise averages down. Adding spectra at 45 and 60 degrees in both
+polarizations determines every index error to about 0.002, close to
+the error bars the fit of example 14 reported for the same plan
+(0.0018 to 0.0025). A plan that no measurement of this kind can
+resolve is refused, and the message names the invisible combination:
+two touching layers of the same index show only their total thickness,
+so making layer 2 thicker and layer 1 thinner by the same amount
+(relative errors in the proportion 0.8 to -0.6, because the layers are
+0.06 and 0.08 um thick) changes no spectrum.
+
+The prediction is the inverse Fisher information,
+`(J^T W J)^-1`, with `J` the exact Jacobian of the planned spectra and
+`W` the inverse noise variances. For independent Gaussian noise this
+is the smallest covariance any unbiased fit can reach (the Cramer-Rao
+bound; C. R. Rao, Bull. Calcutta Math. Soc. 37, 81 (1945)), and it is
+the uncertainty the recovery functions report after a fit. It is a
+first-order prediction: it holds while the spectrum changes linearly
+over the predicted uncertainty. In the tests, the scatter of 200
+actual fits matches it within 7 % at 0.1 % noise, but is 17 % to 33 %
+larger at 0.3 % noise for a stack whose errors are then determined only
+to about 1 %. It does not include errors of the model (a wrong
+substrate index, a missing back face) or of the instrument's
+calibration, and a fit can still find a distant second solution. A
+small predicted uncertainty is necessary for a reliable recovery, not
+sufficient.
+
 ## What is in the package
 
 Every name below is exported from `fabtwin` unless marked
@@ -1219,6 +1372,10 @@ example) gives the inputs, units and conventions.
 `fabtwin.fidelity`)
 
 - `save_traces_csv`, `load_traces_csv`, `validate_traces` (example 4).
+- New in 0.9.0: `load_spectrum_csv(path, wavelength_unit,
+  value_unit, column=1)` -- a measured spectrum from a
+  spectrophotometer's text export, in micrometers and fractions
+  (example 19).
 - `moment_errors` -- largest difference of the means, and the size
   (Frobenius norm: square root of the sum of squared entries) of the
   difference of the covariance matrices and of the correlation
@@ -1249,6 +1406,12 @@ example) gives the inputs, units and conventions.
   0.8.0, example 17). Both warn (`RuntimeWarning`, results unchanged)
   when an error sits on the edge of the search box, and, when the
   noise level is given, when the chi-square p-value is below 1e-6.
+- New in 0.9.0: `recovery_precision(lam, measurements, recipe_t, n0,
+  shape, fit_index=...)` -> `RecoveryPlan` (fields `sigma_t`,
+  `sigma_n`, `covariance`, `correlation`, `names`,
+  `condition_number`, `n_values`, `n_unknowns`): the uncertainties a
+  planned set of measurements would give, before measuring (example
+  20).
 
 **Planning** (`fabtwin.lab`)
 
@@ -1354,11 +1517,23 @@ example) gives the inputs, units and conventions.
   array, `k > n` or a confidence outside (0, 1); `cvar_interval` and
   `cvar_difference` get fewer than `min_tail` (20 by default) draws in
   the tail, and `cvar_difference` gets paired samples of different
-  lengths.
+  lengths;
+- new in 0.9.0: `stack_rt`, `transmittance` and `reflectance` get an
+  angle that is not finite or is larger than pi/2 in size (0.8.0
+  silently used `pi - theta`; a negative angle still gives the same
+  result as the positive one); `notch_weights` or `bandpass_weights`
+  get a negative `half_um` or `guard_um` (the bands would overlap);
+  `errors_from_spectrum` or `errors_from_spectra` get a search
+  half-width (`max_error`, `max_index_error`) that is not positive
+  (before, this surfaced as "no multi-start converged"), or
+  `errors_from_spectra` gets `n_boot` with no noise level and no
+  degrees of freedom to estimate one; `load_traces_csv` names the line
+  of a field that is not a number; `load_spectrum_csv` and
+  `recovery_precision` refuse what examples 19 and 20 describe.
 
 ## How the results are checked
 
-132 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+160 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
@@ -1607,6 +1782,40 @@ statistical tolerances. The main checks:
   interval covers the truth in 92 % to 97 % of them; the unpaired
   standard error is the root-sum-square of the two (1e-12).
 
+**Lab data, measurement planning and the 0.9.0 fixes**
+
+- The tail count `ceil(alpha K)` and the conformal rank
+  `ceil((n + 1)(1 - alpha))` equal exact rational arithmetic for every
+  `alpha` from 0.01 to 0.99 in steps of 0.01 and every `K` and `n` up
+  to 400; `cvar` of 0, 1, ..., 99 at `alpha = 0.07` is the mean of the
+  7 smallest values, 3.0; `cvar_objective_and_grad` (and so
+  `robustify`) averages exactly the 7 worst of 100 draws; and the
+  conformal quantile of the scores 1 to 149 at `alpha = 0.18` is 123.
+- With no noise level and no degrees of freedom, the recovery
+  functions return NaN uncertainties with a warning; with a noise
+  level and one wavelength, the uncertainty equals the noise divided
+  by a central finite difference of the forward optics (1e-6).
+- `load_spectrum_csv`: files written by the test in an
+  instrument-like layout (header, a scan from long to short
+  wavelengths, trailing commas, a metadata block; also tab-, space- and
+  semicolon-separated, with a byte-order mark) come back with exactly
+  the known unit conversions; twelve kinds of unreadable file or
+  contradictory unit are refused; a coated plate written in nm and %T
+  and read back gives its thickness errors to 1e-6.
+- `recovery_precision`: its covariance equals the one built from a
+  Jacobian by central finite differences of the forward optics
+  `stack_rt` (relative 1e-5; three measurements, index errors fitted
+  for two layers, with and without a back face); for one layer it
+  equals the closed form `sigma / sqrt(sum (dT/dx)^2)` (1e-6); over
+  200 simulated spectra with 0.1 % noise, the scatter of the errors
+  recovered by `errors_from_spectrum` is within 20 % of the prediction
+  (observed within 7 %), and the uncertainties the fits report agree
+  with it within 2 %; at the recipe it equals the uncertainties
+  `errors_from_spectra` reports (1e-6); and an invisible combination
+  (two touching layers of one index) is refused, naming both layers.
+- `__version__` equals the version in `pyproject.toml` and
+  `CITATION.cff`.
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -1615,6 +1824,35 @@ generator matches finite differences to a relative 1e-5;
 works, not how good a trained twin is.
 
 ## Corrections in earlier versions
+
+**0.9.0 fixed two silent wrong answers.**
+
+- *One value too many in a tail or a conformal rank.* `cvar` averages
+  the `ceil(alpha K)` smallest values, and the conformal functions use
+  the rank `ceil((n + 1)(1 - alpha))`. In floating point, some of these
+  products land just above a whole number (`0.07 * 100` is
+  `7.000000000000001`), and 0.8.0 then rounded up one too far. So
+  `cvar(np.arange(100.0), 0.07)` gave 3.5 (the mean of the 8 smallest)
+  instead of 3.0 (the 7 smallest); `cvar_interval` on 400 draws at
+  `alpha = 0.07` reported 29 tail draws instead of 28; and
+  `conformal_quantile` of the scores 1 to 149 at `alpha = 0.18` gave
+  124 instead of 123, with `conformal_coverage_exact(149, 0.18)` 0.8267
+  instead of 0.82. The same count is used by `tail_statistics`,
+  `cvar_objective_and_grad` and `robustify` (the default `"sort"`
+  estimator), `robustify_gan`, `mondrian_quantiles` and
+  `AdaptiveConformal`. Up to `K = 1000`, 141 pairs of `alpha` (in steps
+  of 0.01) and `K` were affected for the tail, for example
+  `alpha = 0.07` or `0.14`, and 577 for the conformal rank, for
+  example `alpha = 0.18` or `0.41`; the common levels 0.05, 0.1, 0.2
+  and 0.25 were not affected, and no README example changes.
+- *An uncertainty with no noise behind it.* Without a noise level
+  (`sigma_T`, or `Measurement.sigma`), the recovery functions scale the
+  uncertainties by the misfit per degree of freedom. With as many
+  measured values as unknowns there is no degree of freedom, and 0.8.0
+  returned the unscaled value, which assumes a noise of 1 (100 % in
+  `T`): for one layer (0.080 um of index 2.0 on 1.5) measured at one
+  wavelength, `sigma = 7.400`. It is now NaN, with a warning, and the
+  parametric bootstrap is refused in that case.
 
 **0.7.0 fixed a wrong reflectance beyond the critical
 angle.** Past the critical angle of a lossless medium (light arriving
@@ -1661,6 +1899,20 @@ tolerance; the list above gives the tolerances the tests actually
 use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
+
+What 0.9.0 adds, and its limits:
+
+- **Reading instrument files.** `load_spectrum_csv` reads plain-text
+  tables; it does not read binary instrument formats or files with
+  several scans in blocks one after another (it refuses the second
+  block rather than mixing scans). It returns values as measured, and
+  noise can put a measured `T` slightly below 0 or above 1, which the
+  recovery functions refuse; how to treat such points is left to you.
+- **Planning a measurement.** `recovery_precision` is a first-order
+  prediction for independent Gaussian noise of the stated size, at the
+  recipe (or at errors you give). It does not include model errors,
+  instrument calibration errors or distant second solutions, and at
+  larger noise the actual scatter can be larger (see example 20).
 
 What 0.8.0 changed about the limits of 0.7.0:
 
