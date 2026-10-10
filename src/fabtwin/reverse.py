@@ -13,10 +13,10 @@ merit landscape is full of.
 Reliability is the hard part of reverse engineering, not optimization
 -- different error vectors can reproduce a measured spectrum within
 its noise, and an algorithm that silently returns one of them is a
-random-number generator with good manners (A. V. Tikhonravov and
-M. K. Trubetskov, Appl. Opt. 51, 245 (2012); T. V. Amotchkina,
-M. K. Trubetskov, V. Pervak and A. V. Tikhonravov, Appl. Opt. 51,
-5543 (2012)). This implementation therefore refuses rather than
+random-number generator with good manners (A. V. Tikhonravov et
+al., Appl. Opt. 51, 245 (2012); T. V. Amotchkina, M. K. Trubetskov,
+V. Pervak, B. Romanov and A. V. Tikhonravov, Appl. Opt. 51, 5543
+(2012)). This implementation therefore refuses rather than
 guesses, three separate ways:
 
 * fewer spectral points than layers is refused outright
@@ -274,7 +274,7 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
             raise ValueError(
                 "non-unique recovery: distinct error vectors reproduce "
                 "the measured spectrum equally well (reverse-engineering "
-                "reliability, Tikhonravov and Trubetskov, Appl. Opt. 51, "
+                "reliability, Tikhonravov et al., Appl. Opt. 51, "
                 "245 (2012)); widen the spectral range, add points, or "
                 "fix layers you trust")
     J = jac(x_best)
@@ -519,8 +519,8 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
                 np.max(np.abs(p_i - p_best)) > distinct_atol:
             raise ValueError(
                 "non-unique recovery: distinct error vectors reproduce "
-                "the measured spectra equally well (Tikhonravov and "
-                "Trubetskov, Appl. Opt. 51, 245 (2012)); add "
+                "the measured spectra equally well (Tikhonravov et "
+                "al., Appl. Opt. 51, 245 (2012)); add "
                 "measurements (angles, R and T), or fix layers you trust")
     J = jac(p_best)
     sv = np.linalg.svd(J, compute_uv=False)

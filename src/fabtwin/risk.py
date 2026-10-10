@@ -168,7 +168,7 @@ def cvar_interval(values, alpha: float, confidence: float = 0.95,
 
         se = std(psi) / sqrt(K),
 
-    with tau the ceil(alpha K)-th smallest value. Hancock and Manistre
+    with tau the ceil(alpha K)-th smallest value. Manistre and Hancock
     (North American Actuarial Journal 9(2), 129 (2005)) develop and
     test a large-sample variance for this estimator; the formula here
     is derived as just stated and checked against simulation in the
