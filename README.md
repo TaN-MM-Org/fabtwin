@@ -48,6 +48,9 @@ It answers questions such as:
 - Before booking the instrument: which measurements (angles,
   polarizations, `R` or `T`) would pin down each layer's error, and to
   what precision?
+- The machine stops each layer with an optical monitor: at which
+  monitor wavelength does every layer stop reliably, and how large is
+  the thickness error that the monitor's noise causes?
 
 The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
@@ -73,6 +76,7 @@ looks fine but is not.
 - [A short guide to the words used here](#a-short-guide-to-the-words-used-here)
 - [Install and requirements](#install-and-requirements)
 - [Examples](#examples) (each with the output it prints)
+- [Tutorials](#tutorials) (complete scripts, from data to a result)
 - [What is in the package](#what-is-in-the-package)
 - [When it refuses, and why](#when-it-refuses-and-why)
 - [How the results are checked](#how-the-results-are-checked)
@@ -221,9 +225,9 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.9.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
-0.11 on Linux). Examples 1 to 18 print exactly what they printed with
-0.8.0. Wavelength ranges, stacks, error sizes and noise levels are
+printed with fabtwin 0.10.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
+0.11 on Linux). Examples 1 to 20 print exactly what they printed with
+0.9.1; example 21 is new. Wavelength ranges, stacks, error sizes and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
 literature references. All examples except example 8 need only the
@@ -1237,6 +1241,139 @@ calibration, and a fit can still find a distant second solution. A
 small predicted uncertainty is necessary for a reliable recovery, not
 sufficient.
 
+### 21. Planning the optical monitoring of a run
+
+```python
+import warnings
+import numpy as np
+import fabtwin as ft
+
+t = np.array([0.075, 0.098, 0.066, 0.118])    # recipe (um); layer 3 is grown first
+n = np.array([2.1, 1.46, 2.1, 1.46])           # indices at the monitor wavelength
+for lam_mon in (0.52, 0.60):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        p = ft.monitoring_plan(lam_mon, t, n, n_sub=1.52, sigma_signal=0.001)
+    print(f"monitor at {lam_mon} um, noise 0.1 % in T:")
+    for j in p.order:
+        print(f"  layer {j}: stop at T = {p.cutoff[j]:.4f}, "
+              f"{p.turning_points[j]} turning point(s) before, "
+              f"thickness error +/- {1e3 * p.sigma_t[j]:.2f} nm")
+    for w in caught:
+        print("  warning:", str(w.message).split(":")[0])
+```
+
+```
+monitor at 0.52 um, noise 0.1 % in T:
+  layer 3: stop at T = 0.9684, 1 turning point(s) before, thickness error +/- 4.54 nm
+  layer 2: stop at T = 0.7427, 1 turning point(s) before, thickness error +/- 0.77 nm
+  layer 1: stop at T = 0.9527, 1 turning point(s) before, thickness error +/- 0.45 nm
+  layer 0: stop at T = 0.5346, 1 turning point(s) before, thickness error +/- 0.16 nm
+monitor at 0.6 um, noise 0.1 % in T:
+  layer 3: stop at T = 0.9712, 1 turning point(s) before, thickness error +/- nan nm
+  layer 2: stop at T = 0.7354, 0 turning point(s) before, thickness error +/- nan nm
+  layer 1: stop at T = 0.9602, 1 turning point(s) before, thickness error +/- 0.92 nm
+  layer 0: stop at T = 0.4666, 2 turning point(s) before, thickness error +/- nan nm
+  warning: layer(s) 0, 2, 3 end too close to a turning point of the monitor signal at 0.6 um (nonlinearity above 0.1)
+```
+
+Many deposition machines stop each layer with an optical monitor: a
+beam at one wavelength shines through the growing coating, and the
+layer is stopped when the transmittance (or reflectance) reaches a value computed from
+the recipe ("level monitoring"; G. J. Kopec, Optica Applicata 17(1),
+33 (1987)). While a layer grows, the signal rises and falls. At a
+maximum or minimum (a turning point) it hardly changes with
+thickness, so noise in the signal becomes a large thickness error.
+`monitoring_plan` computes, for one monitor wavelength and before any
+run, the value at which each layer is stopped (`cutoff`), the slope of
+the signal there, how many turning points the layer passes, and the
+thickness error that a stated signal noise causes,
+`sigma_t = sigma_signal / |slope|`. Layer 3 is grown first, because
+layer 0 is the one next to the incidence medium. The `n` given are the
+indices at the monitor wavelength (with dispersion: `n0 * S(lam_mon)`).
+
+The formula is first order, so it is only trusted while the signal is
+close to a straight line over `+/- sigma_t`. When a layer ends too
+close to a turning point (`nonlinearity` above 0.1), its `sigma_t` is
+NaN with a warning, as at 0.60 um above. At 0.52 um every layer can be
+stopped, but layer 3 only to about 4.5 nm, because it ends on a flat
+part of its curve. The [monitoring tutorial](#tutorials) scans many
+monitor wavelengths for a designed filter and checks the predictions
+against simulated stops.
+
+## Tutorials
+
+The `examples/` directory has complete scripts that go from data to a
+result with its uncertainty. Each uses only the package, generates its
+"measured" data with fixed seeds, runs in under 30 seconds, and prints
+what is shown below (also at the top of each script). A test runs both
+and checks the printed numbers.
+
+**`examples/tutorial_monitoring.py`: choose the monitor wavelength.**
+It designs the 8-layer notch filter of example 3, plans level
+monitoring (0.1 % noise in `T`) at every wavelength from 0.40 to
+0.80 um, and picks the one with the smallest worst-layer relative
+thickness error. It then checks the predicted error of every layer
+against 400 simulated noisy stops, each found by root finding on the
+forward optics, not by the planner. Finally it compares the worst
+10 % of the filter's merit (CVaR) under the thickness errors of the
+best and of the worst usable wavelength, with confidence intervals.
+
+```
+design merit 0.7704
+wavelengths that can monitor every layer: 14 of 41
+best monitor wavelength 0.470 um: worst relative thickness error 0.0054
+worst usable wavelength 0.730 um: worst relative thickness error 0.0506
+layer  turning points  predicted sigma_t (nm)  simulated (nm)
+    7               1                   0.265   0.256 +/- 0.009
+    6               2                   0.206   0.209 +/- 0.007
+    5               1                   0.167   0.172 +/- 0.006
+    4               1                   0.087   0.086 +/- 0.003
+    3               1                   0.154   0.156 +/- 0.006
+    2               2                   0.306   0.310 +/- 0.011
+    1               0                   0.164   0.170 +/- 0.006
+    0               1                   0.059   0.058 +/- 0.002
+CVaR(10 %) of the merit at 0.470 um: 0.76998 +/- 0.00001
+CVaR(10 %) of the merit at 0.730 um: 0.76330 +/- 0.00025
+difference 0.00668, 95 % interval 0.00621 to 0.00715
+```
+
+Only 14 of the 41 wavelengths can stop every layer reliably. The
+simulated scatter agrees with the prediction within its standard
+error for every layer. With these small errors the merit changes
+little, but the best wavelength is still clearly better than the worst
+usable one.
+
+**`examples/tutorial_spectra_to_twin.py`: from measured spectra to a
+model of the machine.** It first compares measurement plans with
+`recovery_precision`: one normal-incidence spectrum cannot pin down
+the middle layers, while spectra at 0 and 60 degrees can. It then
+simulates 24 runs of a hidden machine (the reference process with only
+its thickness errors on: a 2 % rate bias and correlated run-to-run
+noise), "measures" each with 0.2 % noise, and recovers each run's
+thickness errors with `errors_from_spectra`. From the 24 recovered
+error vectors it estimates the machine's bias per layer, with standard
+errors, and fits a `GaussianTwin`.
+
+```
+T at 0 deg: predicted sigma of the thickness errors [0.0192 0.0366 0.028  0.0059 0.0014]
+T at 0 deg, 60 deg s and p: predicted sigma of the thickness errors [0.0013 0.0025 0.0021 0.0013 0.0009]
+recovered minus true, in reported standard deviations: rms 1.00 over 120 errors (1 expected), largest 2.70
+smallest chi-square p-value of the 24 fits: 0.136
+bias per layer:    [0.0169 0.0155 0.0177 0.0226 0.028 ]
+  standard error:  [0.0035 0.0053 0.005  0.0063 0.0047]
+pooled thickness bias 0.0201 +/- 0.0033 (hidden machine: 0.02)
+twin scatter per layer:       [0.0174 0.0258 0.0243 0.0307 0.023 ]
+hidden machine, same 24 runs: [0.0174 0.0248 0.0246 0.0304 0.023 ]
+```
+
+The recovered errors scatter around the hidden truth exactly as their
+reported uncertainties say (rms 1.00 in units of the reported standard
+deviation). The pooled bias, 0.0201 +/- 0.0033, matches the hidden
+2 %, and the twin's run-to-run scatter matches the machine's. The
+twin's scatter also contains the measurement noise, which here is
+small.
+
 ## What is in the package
 
 Every name below is exported from `fabtwin` unless marked
@@ -1413,6 +1550,16 @@ example) gives the inputs, units and conventions.
   planned set of measurements would give, before measuring (example
   20).
 
+**Monitoring a run** (`fabtwin.monitor`, new in 0.10.0)
+
+- `monitoring_plan(lam_mon_um, recipe_t_um, n_layers, n_inc=1.0,
+  n_sub=1.52, quantity="T", sigma_signal=None, theta0_rad=0.0,
+  pol="s", n_exit=None)` -> `MonitoringPlan` (fields `order`,
+  `start`, `cutoff`, `slope`, `turning_points`, `slope_ratio`,
+  `sigma_t`, `rel_sigma_t`, `nonlinearity`, `curves`; method
+  `worst_rel_sigma_t()`): the level-monitoring plan of a recipe at one
+  monitor wavelength (example 21 and the monitoring tutorial).
+
 **Planning** (`fabtwin.lab`)
 
 - `design_recipes` (with `refine=True`, new in 0.7.0),
@@ -1529,11 +1676,18 @@ example) gives the inputs, units and conventions.
   `errors_from_spectra` gets `n_boot` with no noise level and no
   degrees of freedom to estimate one; `load_traces_csv` names the line
   of a field that is not a number; `load_spectrum_csv` and
-  `recovery_precision` refuse what examples 19 and 20 describe.
+  `recovery_precision` refuse what examples 19 and 20 describe;
+- new in 0.10.0: `monitoring_plan` gets a monitor wavelength or a
+  thickness that is not positive, indices that do not match the
+  thicknesses or have a non-positive real part, a quantity other than
+  `"T"` or `"R"`, a `sigma_signal` that is not positive, or fewer than
+  8 points per quarter wave. It returns NaN for `sigma_t`, with a
+  warning, for a layer that ends too close to a turning point of the
+  monitor signal (the first-order error would not be trustworthy).
 
 ## How the results are checked
 
-160 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+180 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
@@ -1816,6 +1970,43 @@ statistical tolerances. The main checks:
 - `__version__` equals the version in `pyproject.toml` and
   `CITATION.cff`.
 
+**Monitoring, opaque layers, speed and the 0.10.0 fixes**
+
+- `monitoring_plan`: for one layer on a substrate, the monitor curve
+  equals the closed form
+  `T = 4 n0 ns / ((n0 + ns)^2 cos^2 d + (n0 ns / n1 + n1)^2 sin^2 d)`
+  (1e-13) and the slope its derivative (relative 1e-10), and the
+  number of turning points is the number of multiples of a quarter
+  wave inside the layer; the cut-off values equal the transmittance or
+  reflectance of each partial stack computed separately with
+  `stack_rt` (1e-13, also at an angle, in reflection and with a back
+  face), each layer starts where the one before it stopped, and the
+  slopes match central finite differences of `stack_rt` (relative
+  1e-7); a quarter-wave stack monitored at its design wavelength ends
+  every layer on a turning point and is refused; over 400 simulated
+  stops per layer (signal = cut-off minus noise, solved by root
+  finding on `stack_rt`), the scatter of the thicknesses matches the
+  predicted `sigma_t` within 12 % (observed within 6 %).
+- Opaque layers: 10, 20 and 200 um of a metal (`n = 1 + 6i`) give the
+  Fresnel reflectance of the metal, `R = 0.9`, and `T = 0`, in s, p
+  and unpolarized light (1e-12); the derivatives of `R` with respect to
+  the metal's `n` and `k` equal the derivatives of the Fresnel formula
+  (1e-12); a coated opaque metal agrees with the `tmm` package
+  (1e-12); 70 um of air between two glass blocks at 60 degrees
+  reflects totally (`R = 1`, 1e-12). Below the switching point the
+  results are the 0.9.1 ones, bit for bit; just above it they agree
+  with the 0.9.1 arithmetic to 1e-13 (`R`) and 1e-11 (`T`).
+- `robustify`, `cvar_objective_and_grad` and `ru_objective_and_grad`
+  (without `model=`) return the same numbers as 0.9.1, bit for bit:
+  the tests compare the batched draws with the 0.9.1 per-draw loop on
+  25 random cases with `np.array_equal`.
+- The conformal rank is never 0, against exact rational arithmetic for
+  `alpha = 1 - 10^-k`, `k = 1 ... 15`.
+- Both tutorials print what is shown above (to the last printed
+  digit), and their results pass checks of their own: simulated
+  scatter against prediction within 4 standard errors, and the
+  recovered bias within 3 standard errors of the hidden one.
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -1824,6 +2015,34 @@ generator matches finite differences to a relative 1e-5;
 works, not how good a trained twin is.
 
 ## Corrections in earlier versions
+
+**0.10.0 fixed two wrong answers at extreme but valid inputs.**
+
+- *NaN for an opaque layer.* In a strongly absorbing layer (a thick
+  metal), or a thick layer in which the light only decays (beyond the
+  critical angle), the numbers inside the transfer-matrix calculation
+  grow exponentially with thickness, like `exp(m)`, where `m` is the
+  sum over the layers of the imaginary part of the phase thickness (in
+  size). Up to 0.9.1 they overflowed: `stack_rt`, `transmittance`,
+  `reflectance` and `stack_rta_and_grads` returned NaN for `R` and `T`
+  (and the derivatives) once `m` passed about 709, and printed
+  overflow warnings from about 355. For example, 10 um of a metal with `n = 1 + 6i` at
+  0.5 um under 0.1 um of index 1.46 on glass gave `R = NaN`; the
+  independent `tmm` package and 0.10.0 give `R = 0.840580` and
+  `T = 0`. When `m` is above 300, the calculation now scales each
+  layer's matrix by `exp(-m_i)`, which leaves `R` unchanged and is
+  undone exactly in `T`. Results with `m` up to 300 are unchanged, bit
+  for bit.
+- *The largest score instead of the smallest.* For `alpha` within
+  about `1e-9 / (n + 1)` of 1, the conformal rank came out as 0, and
+  rank 0 picked the last, largest score. `conformal_quantile` of the
+  scores 1 to 10 at `alpha = 1 - 1e-12` gave 10.0 instead of 1.0, and
+  `conformal_coverage_exact(10, 1 - 1e-12)` gave 0.0 instead of
+  1/11. `AdaptiveConformal` can reach such an `alpha_t` on its own:
+  after 60 runs scored 0 with `alpha = 0.25` and `gamma = 0.05`,
+  `alpha_t` is 0.9999999999999984 (1 in exact arithmetic) and the
+  half-width was 2.3250, the largest score in the window, instead of
+  0.0. `mondrian_quantiles` was affected in the same way.
 
 **0.9.0 fixed two silent wrong answers.**
 
@@ -1899,6 +2118,25 @@ tolerance; the list above gives the tolerances the tests actually
 use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
+
+What 0.10.0 adds, and its limits:
+
+- **Monitoring plans.** `monitoring_plan` plans level monitoring for
+  the recipe as designed, one wavelength at a time. It does not follow
+  how an error in one layer changes the monitor curves of the layers
+  after it (real runs often recompute the cut-offs after each layer),
+  and it does not model drift of the monitor or of the deposition
+  rate. Its thickness error is first order in the signal noise; near a
+  turning point it is refused rather than reported. The monitor beam
+  comes from the growing side of the coating (the incidence medium,
+  vacuum by default).
+- **Opaque layers.** `stack_rt` and `stack_rta_and_grads` now stay
+  finite for any absorption. `T` then underflows to 0 when it is below
+  about `1e-308`. The lower-level `fabtwin.tmm.stack_BC` still returns
+  the unscaled `B` and `C`, which can overflow.
+- **Speed.** `robustify` (without `model=`) now evaluates all draws of
+  a step at once, with the same numbers as before. With `model=` it
+  still evaluates one draw at a time.
 
 What 0.9.0 adds, and its limits:
 

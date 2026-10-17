@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.10.0 (2026-10-17)
+
+Planning the optical monitoring of a run, two fixes at extreme inputs,
+a faster `robustify`, and two worked tutorials.
+
+### Added
+
+- `monitoring_plan(lam_mon_um, recipe_t_um, n_layers, n_inc=1.0,
+  n_sub=1.52, quantity="T", sigma_signal=None, theta0_rad=0.0,
+  pol="s", n_exit=None, points_per_quarter_wave=32,
+  max_nonlinearity=0.1)` -> `MonitoringPlan` (new module
+  `fabtwin.monitor`): the level-monitoring plan of a recipe at one
+  monitor wavelength, before any run (level monitoring as in G. J.
+  Kopec, Optica Applicata 17(1), 33 (1987)). For every layer, in the
+  order of deposition (substrate side first): the monitor signal along
+  its growth (`curves`), the value at which to stop it (`cutoff`), the
+  exact slope there, the number of turning points passed, and, for a
+  stated signal noise, the thickness error it causes,
+  `sigma_t = sigma_signal / |slope|` (first-order propagation). Where
+  the second-order term is not small (`nonlinearity =
+  |S''| sigma_signal / (2 S'^2)` above `max_nonlinearity`), that is,
+  where a layer ends too close to a turning point, `sigma_t` is NaN
+  with a RuntimeWarning instead of a number that looks precise.
+  Transmission or reflection, any angle and polarization, absorbing
+  layers, and a monitor that measures through the whole plate
+  (`n_exit`). Refused: a non-positive wavelength or thickness,
+  mismatched shapes, a quantity other than "T" or "R", a non-positive
+  noise, too coarse a sampling.
+- README example 21 (monitoring plans at two wavelengths).
+
+### Fixed
+
+- NaN for opaque layers. In a strongly absorbing layer, or a thick
+  layer in which the light is evanescent, cos and sin of the complex
+  phase grow like `exp(|Im delta|)`. `stack_rt`, `transmittance`,
+  `reflectance` and `stack_rta_and_grads` overflowed: NaN for `R`, `T`
+  and every derivative once the sum `m` of `|Im delta|` over the layers
+  passed about 709, and overflow warnings from about 355. Before ->
+  after: 0.1 um of index 1.46 over 10 um of `n = 1 + 6i` on glass
+  (1.52), 0.5 um, normal incidence: `R` NaN -> 0.840580 (the `tmm`
+  package: 0.840580), `T` NaN -> 0; 10 um of that metal alone:
+  `R` NaN -> 0.9 (the Fresnel value 36/40); glass (1.5) -> 70 um of
+  air -> glass at 60 degrees: `R` NaN -> 1.0. Cause: no rescaling of
+  the layer matrices. Now, in every wavelength column with `m` above
+  300, each layer matrix (and its derivatives) is multiplied by
+  `exp(-m_i)`, which leaves `r` and every ratio of derivatives
+  unchanged, and `T` is multiplied back by `exp(-2 m)`. Columns with
+  `m` up to 300 take the old path, bit for bit (300 random stacks
+  compared with 0.9.1: forward optics, every derivative, with and
+  without `n_exit`). Tests:
+  `test_v010.py::test_opaque_metal_gives_the_fresnel_closed_form`,
+  `test_opaque_layer_under_a_coating_matches_tmm_package`,
+  `test_thick_evanescent_gap_reflects_totally`,
+  `test_opaque_rescaling_leaves_other_results_unchanged`.
+- A conformal rank of 0. `_ceil_count` (0.9.0) returned 0 for
+  `0 < x <= 1e-9`, so for `alpha` within about `1e-9 / (n + 1)` of 1
+  the rank `ceil((n + 1)(1 - alpha))` was 0, and index `0 - 1` picked
+  the largest score. Before -> after: `conformal_quantile` of the
+  scores 1..10 at `alpha = 1 - 1e-12` 10.0 -> 1.0;
+  `conformal_coverage_exact(10, 1 - 1e-12)` 0.0 -> 0.0909 (1/11);
+  `AdaptiveConformal(|N(0,1)| x 100, seed 0, alpha=0.25,
+  gamma=0.05)` after 60 runs scored 0 (`alpha_t` =
+  0.9999999999999984): `half_width()` 2.3250 -> 0.0;
+  `mondrian_quantiles` the same as `conformal_quantile`. A positive
+  count is now at least 1. Tests:
+  `test_v010.py::test_positive_count_is_never_zero`,
+  `test_conformal_quantile_near_alpha_one_is_the_smallest_score`,
+  `test_adaptive_conformal_half_width_just_below_alpha_one`.
+
+### Performance
+
+- `robustify`, `cvar_objective_and_grad` and `ru_objective_and_grad`
+  without `model=`: all draws of a step go through the hand adjoint at
+  once (in chunks that fit the processor cache), with the same
+  arithmetic, element by element, as the per-draw loop. The results
+  are equal bit for bit (`np.array_equal` against the 0.9.1 loop,
+  kept in the tests, on 25 random cases; the README examples print the
+  same). Measured on one 2-CPU machine (median of 5 runs, NumPy 2.5):
+  8 layers, 41 wavelengths, `K = 32` (README example 3): 3.4x to 3.9x;
+  10 layers, 61 wavelengths, `K = 64`: 2.4x to 2.9x; 20 layers, 161
+  wavelengths, `K = 128`: 1.1x to 1.5x (the range is over repeated
+  sessions on a shared machine).
+
+### Tutorials
+
+- `examples/tutorial_monitoring.py`: design a notch filter, scan the
+  monitor wavelength with `monitoring_plan`, check the predicted
+  thickness errors against 400 simulated stops per layer, and compare
+  the merit CVaR at the best and the worst usable wavelength, with
+  confidence intervals.
+- `examples/tutorial_spectra_to_twin.py`: compare measurement plans
+  with `recovery_precision`, recover the thickness errors of 24
+  simulated runs from their spectra, and estimate the machine's bias
+  (0.0201 +/- 0.0033 against a hidden 0.02) and scatter.
+- Their printed output is in the README (new "Tutorials" section) and
+  at the top of each script; `tests/test_tutorials.py` runs both and
+  checks the printed numbers.
+
+### Changed
+
+- `stack_rta_and_grads` accepts, internally only, one thickness per
+  layer and wavelength column (used by `monitoring_plan`); the public
+  call is unchanged.
+- README: example 21, the Tutorials section, the new function,
+  refusals, checks, corrections and limits.
+
+### Tests
+
+180 tests (160 in 0.9.1): new files `test_v010.py` (18) and
+`test_tutorials.py` (2). Independent references: exact rational
+arithmetic; the Fresnel reflectance of a semi-infinite absorbing
+medium and its derivatives, by hand; total internal reflection; the
+`tmm` package; the unchanged `stack_BC` and the 0.9.1 per-draw loop,
+kept as references; the closed form of one layer on a substrate;
+partial stacks computed separately with `stack_rt`; central finite
+differences; and 400 simulated monitor stops per layer, found by root
+finding on `stack_rt` (scatter within 6 % of the prediction; the test
+allows 12 %). The new tests add about 20 s, most of it the two
+tutorials.
+
 ## 0.9.1 (2026-10-10)
 
 Citation corrections and packaging.
