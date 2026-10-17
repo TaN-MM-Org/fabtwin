@@ -119,6 +119,91 @@ def transmittance_and_grads(lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0):
     return T, dT_dt, dT_dn0
 
 
+def _merits_and_grads_batch(lam_um, t_um, n0, shape, weights, const,
+                            n_inc=1.0, n_sub=1.0):
+    """`merit_and_grad` for K designs at once (new in 0.10.0; internal).
+
+    t_um, n0 : (K, N). Returns J (K,), dJ_dt (K, N), dJ_dn0 (K, N),
+    equal bit for bit to K separate `merit_and_grad` calls (the same
+    arithmetic, element by element, with a leading batch axis; the
+    final sums over wavelength are taken one design at a time on
+    contiguous arrays, as in `merit_and_grad`). The tests compare the
+    two on random batches with `np.array_equal`.
+    """
+    if any(np.iscomplexobj(np.asarray(a))
+           for a in (t_um, n0, shape, n_sub, n_inc)):
+        raise ValueError("the hand adjoint covers real (lossless) "
+                         "designs; use fabtwin.tmm for absorbing stacks")
+    lam = np.asarray(lam_um, dtype=float)
+    t = np.asarray(t_um, dtype=float)
+    n0v = np.asarray(n0, dtype=float)
+    if t.ndim != 2 or n0v.shape != t.shape:
+        raise ValueError("t_um and n0 must be (K, N) arrays of one shape")
+    K, N = t.shape
+    L = lam.size
+    S = np.asarray(shape, dtype=float)
+    if S.ndim == 1:
+        if S.shape != lam.shape:
+            raise ValueError("shape must be S(lam) on the wavelength "
+                             "grid, or (N, L) for per-layer dispersion")
+        S = np.broadcast_to(S[None, :], (N, L))
+    elif S.shape != (N, L):
+        raise ValueError("per-layer shape must be (N, L)")
+    tT = np.ascontiguousarray(t.T)                    # (N, K)
+    n = n0v.T[:, :, None] * S[:, None, :]             # (N, K, L)
+    delta = 2.0 * np.pi * n * tT[:, :, None] / lam[None, None, :]
+    eta = n
+    eta_sub = np.asarray(n_sub, dtype=float)
+    if eta_sub.ndim == 0:
+        eta_sub = np.full(L, float(eta_sub))
+    eta0 = float(n_inc)
+    c = np.cos(delta)
+    s = np.sin(delta)
+
+    l0 = np.empty((N, K, L), dtype=complex)
+    l1 = np.empty((N, K, L), dtype=complex)
+    a0 = np.full((K, L), eta0, dtype=complex)
+    a1 = np.ones((K, L), dtype=complex)
+    for i in range(N):
+        l0[i], l1[i] = a0, a1
+        b0 = a0 * c[i] + a1 * (1j * eta[i] * s[i])
+        b1 = a0 * (1j * s[i] / eta[i]) + a1 * c[i]
+        a0, a1 = b0, b1
+    D = a0 + a1 * eta_sub
+
+    r0 = np.empty((N, K, L), dtype=complex)
+    r1 = np.empty((N, K, L), dtype=complex)
+    b0 = np.ones((K, L), dtype=complex)
+    b1 = np.broadcast_to(eta_sub.astype(complex), (K, L)).copy()
+    for i in range(N - 1, -1, -1):
+        r0[i], r1[i] = b0, b1
+        nb0 = c[i] * b0 + (1j * s[i] / eta[i]) * b1
+        nb1 = (1j * eta[i] * s[i]) * b0 + c[i] * b1
+        b0, b1 = nb0, nb1
+
+    T = 4.0 * eta0 * eta_sub / np.abs(D) ** 2         # (K, L)
+    dD_ddelta = (-s * (l0 * r0 + l1 * r1)
+                 + 1j * c * (l0 * r1 / eta + eta * l1 * r0))
+    dD_deta = 1j * s * (l1 * r0 - l0 * r1 / eta ** 2)
+    dT_ddelta = -2.0 * T[None, :] * np.real(dD_ddelta / D[None, :])
+    dT_deta = -2.0 * T[None, :] * np.real(dD_deta / D[None, :])
+    two_pi_over_lam = 2.0 * np.pi / lam[None, :]
+    dT_dt = dT_ddelta * n * two_pi_over_lam
+    dT_dn0 = (dT_ddelta * tT[:, :, None] * S[:, None, :] * two_pi_over_lam
+              + dT_deta * S[:, None, :])
+    dT_dt = np.ascontiguousarray(dT_dt.transpose(1, 0, 2))     # (K, N, L)
+    dT_dn0 = np.ascontiguousarray(dT_dn0.transpose(1, 0, 2))
+    w = np.asarray(weights, dtype=float)
+    J = np.empty(K)
+    gd = np.empty((K, N))
+    gn = np.empty((K, N))
+    for k in range(K):
+        J[k] = float(T[k] @ w + const)
+        gd[k] = dT_dt[k] @ w
+        gn[k] = dT_dn0[k] @ w
+    return J, gd, gn
+
+
 def merit_and_grad(lam_um, t_um, n0, shape, weights, const,
                    n_inc=1.0, n_sub=1.0):
     """J = w . T + const and its exact gradients (dJ/dt, dJ/dn0)."""

@@ -43,10 +43,18 @@ def _ceil_count(x: float) -> int:
     product that is genuinely not whole (alpha with up to about 9
     decimals, K below about 1e6) differs from the nearest whole number
     by far more. (New in 0.9.0; 0.8.0 and earlier used np.ceil
-    directly; see the 0.9.0 changelog.)"""
+    directly; see the 0.9.0 changelog.)
+
+    A positive x always gives at least 1 (since 0.10.0): the ceiling of
+    a positive number is never 0. 0.9.x returned 0 for 0 < x <= 1e-9,
+    and a conformal rank of 0 then picked the LARGEST score (index -1)
+    instead of the smallest, for example `conformal_quantile` of the
+    scores 1..10 at alpha = 1 - 1e-12 gave 10.0 instead of 1.0."""
     x = float(x)
     r = round(x)
     if abs(x - r) <= 1e-9 * max(1.0, abs(x)):
+        if r == 0 and x > 0.0:
+            return 1
         return int(r)
     return int(np.ceil(x))
 

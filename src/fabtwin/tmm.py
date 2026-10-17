@@ -133,6 +133,11 @@ def stack_BC(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     lam_um : (L,) wavelengths; t_um : (N,) thicknesses;
     n_layers : (N,) or (N, L), real or complex.
     Returns B, C, eta0 (complex, possibly (L,)), eta_sub (L,).
+
+    B and C grow like exp(sum |Im delta|) and overflow for an opaque
+    stack (a thick metal or a thick evanescent layer); `stack_rt`
+    rescales them and stays finite there (since 0.10.0), this function
+    returns them unscaled, as before.
     """
     delta, eta, eta0, eta_sub = _phases_and_admittances(
         lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol, _s0)
@@ -148,14 +153,62 @@ def stack_BC(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     return B, C, eta0, eta_sub
 
 
+# Opaque layers (new in 0.10.0). In a strongly absorbing or evanescent
+# layer the phase delta has a large imaginary part m = |Im delta|, and
+# cos(delta), sin(delta) grow like exp(m) / 2. Up to 0.9.x the product
+# of the layer matrices overflowed: |B|, |C| ~ exp(sum m) gave a
+# RuntimeWarning beyond sum m of about 355 (|eta0 B + C|^2 above the
+# largest double) and NaN for R and T beyond about 709 (cos(delta)
+# itself overflowing), for example 10 um of a metal with k = 6 at
+# 0.5 um (m = 754). Every layer matrix may be multiplied by a constant
+# without changing r = (eta0 B - C) / (eta0 B + C), and T changes by the
+# square of the product of the constants, so in every wavelength column
+# with sum m above _OPAQUE_SUM the layer matrices are scaled by
+# exp(-m_i) (computed without overflow) and T is multiplied back by
+# exp(-2 sum m). Columns at or below _OPAQUE_SUM take the unchanged
+# path, bit for bit.
+_OPAQUE_SUM = 300.0
+
+
+def _scaled_cos_sin(delta):
+    """cos(delta) exp(-|Im delta|) and sin(delta) exp(-|Im delta|),
+    finite for any complex delta, and m = |Im delta|."""
+    m = np.abs(np.imag(delta))
+    ep = np.exp(1j * delta - m)          # both exponents have Re <= 0
+    em = np.exp(-1j * delta - m)
+    return 0.5 * (ep + em), (ep - em) / 2j, m
+
+
+def _opaque_columns(delta):
+    """(columns needing the scaled path, sum over layers of |Im delta|)."""
+    msum = np.sum(np.abs(np.imag(delta)), axis=0)
+    return msum > _OPAQUE_SUM, msum
+
+
 def _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol,
                  s0=None):
-    B, C, eta0, eta_sub = stack_BC(lam_um, t_um, n_layers, n_inc, n_sub,
-                                   theta0_rad, pol, s0)
+    delta, eta, eta0, eta_sub = _phases_and_admittances(
+        lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol, s0)
+    big, msum = _opaque_columns(delta)
+    with np.errstate(over="ignore", invalid="ignore"):
+        c = np.cos(delta)
+        s = np.sin(delta)
+    if np.any(big):
+        cs, ss, _ = _scaled_cos_sin(delta[:, big])
+        c[:, big] = cs
+        s[:, big] = ss
+    B = np.ones(delta.shape[1], dtype=complex)
+    C = eta_sub.astype(complex).copy()
+    for i in range(delta.shape[0] - 1, -1, -1):
+        Bi = c[i] * B + 1j * s[i] / eta[i] * C
+        Ci = 1j * eta[i] * s[i] * B + c[i] * C
+        B, C = Bi, Ci
     denom = eta0 * B + C
     r = (eta0 * B - C) / denom
     R = np.abs(r) ** 2
     T = 4.0 * np.real(eta0) * np.real(eta_sub) / np.abs(denom) ** 2
+    if np.any(big):
+        T = np.where(big, T * np.exp(-2.0 * np.where(big, msum, 0.0)), T)
     return R, T
 
 

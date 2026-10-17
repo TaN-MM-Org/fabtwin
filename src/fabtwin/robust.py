@@ -126,6 +126,9 @@ class TwinEnsemble:
         return apply_errors(t_um, n0, self.sample_errors(rng, K))
 
 
+_BATCH_ELEMENTS = 2 ** 15
+
+
 def _fab_clip_bounds(box):
     # fabricated devices may exceed the design box; the paper clips to
     # a wider physical window
@@ -140,6 +143,29 @@ def _draws(lam, t, n0, S, w, const, twin, z, box, n_inc, n_sub, model):
     x = twin.transform(z)
     K = x.shape[0]
     t_lo, t_hi, n_lo, n_hi = _fab_clip_bounds(box)
+    if model is None:
+        # all K draws through the adjoint at once (new in 0.10.0): the
+        # same numbers, bit for bit, as the per-draw loop below, which
+        # the tests keep as the reference
+        tk_raw = t[None, :] * (1.0 + x[:, :N])
+        nk_raw = n0[None, :] + x[:, N:]
+        tk = np.clip(tk_raw, t_lo, t_hi)
+        nk = np.clip(nk_raw, n_lo, n_hi)
+        # chunks of about _BATCH_ELEMENTS layer-wavelength values keep
+        # the work arrays small enough for the processor cache
+        Lw = np.asarray(lam).size
+        step = max(1, int(_BATCH_ELEMENTS // max(1, N * Lw)))
+        J = np.empty(K)
+        gdk = np.empty((K, N))
+        gnk = np.empty((K, N))
+        for a in range(0, K, step):
+            J[a:a + step], gdk[a:a + step], gnk[a:a + step] = \
+                adjoint._merits_and_grads_batch(
+                    lam, tk[a:a + step], nk[a:a + step], S, w, const,
+                    n_inc=n_inc, n_sub=n_sub)
+        in_t = (tk_raw > t_lo) & (tk_raw < t_hi)
+        in_n = (nk_raw > n_lo) & (nk_raw < n_hi)
+        return J, gdk * (1.0 + x[:, :N]) * in_t, gnk * in_n
     J = np.empty(K)
     gT = np.empty((K, N))
     gN = np.empty((K, N))

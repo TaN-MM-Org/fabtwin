@@ -21,7 +21,9 @@ the tests verify by seeded simulation against the closed form. (Since
 0.9.0 the rank is computed without floating-point round-off; 0.8.0
 took one rank too many when (n+1)(1-alpha) was a whole number that
 floating point represents slightly above itself, for example
-n = 149, alpha = 0.18.)
+n = 149, alpha = 0.18. Since 0.10.0 the rank is never 0: for alpha
+within about 1e-9 / (n + 1) of 1, 0.9.x computed rank 0 and returned
+the largest score instead of the smallest.)
 
 This is the honest companion to `twin_fidelity_report`: the report
 grades how well the twin matches held-out data in distribution; the

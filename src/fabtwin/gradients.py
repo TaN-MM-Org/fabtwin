@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .tmm import _cos_branch
+from .tmm import _cos_branch, _opaque_columns, _scaled_cos_sin
 
 __all__ = ["stack_rta_and_grads", "layer_indices"]
 
@@ -118,11 +118,25 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, s0, pol):
         eta_sub = nsub / cos_s
         eta0 = n_inc / cos_0
     two_pi_lam = 2.0 * np.pi / lam[None, :]
-    delta = two_pi_lam * q * t[:, None]
-    ddelta_dn = two_pi_lam * t[:, None] * nprime / q
+    # t is (N,) (the public path) or, internally, (N, L): one thickness
+    # per layer and column (fabtwin.monitor puts a growing layer's
+    # thicknesses along the wavelength axis; new in 0.10.0)
+    tc = t if t.ndim == 2 else t[:, None]
+    delta = two_pi_lam * q * tc
+    ddelta_dn = two_pi_lam * tc * nprime / q
     ddelta_dt = two_pi_lam * q
-    c = np.cos(delta)
-    s = np.sin(delta)
+    # opaque columns (new in 0.10.0; see fabtwin.tmm._OPAQUE_SUM): every
+    # layer matrix AND its derivatives are scaled by the same exp(-m_i),
+    # which leaves dD/D and dr unchanged and multiplies T by
+    # exp(-2 sum m); other columns are computed as before, bit for bit
+    big, msum = _opaque_columns(delta)
+    with np.errstate(over="ignore", invalid="ignore"):
+        c = np.cos(delta)
+        s = np.sin(delta)
+    if np.any(big):
+        cs, ss, _ = _scaled_cos_sin(delta[:, big])
+        c[:, big] = cs
+        s[:, big] = ss
 
     # prefix matrices P_i = M_1 ... M_{i-1} (2x2 per wavelength)
     P = np.empty((N, 2, 2, L), dtype=complex)
@@ -154,6 +168,8 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, s0, pol):
     r = (eta0 * B - C) / D
     Rr = np.abs(r) ** 2
     T = 4.0 * np.real(eta0) * np.real(eta_sub) / np.abs(D) ** 2
+    if np.any(big):
+        T = np.where(big, T * np.exp(-2.0 * np.where(big, msum, 0.0)), T)
 
     # dM/d(delta) and dM/d(eta) applied to the suffix vector
     dd0 = -s * R0 + 1j * c / eta * R1
@@ -244,10 +260,17 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     t = np.asarray(t_um, dtype=float)
     if lam.ndim != 1 or t.ndim != 1:
         raise ValueError("lam_um and t_um must be 1-D")
+    return _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
+                          n_exit)
+
+
+def _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
+                   n_exit):
+    # the body of stack_rta_and_grads; t may also be (N, L) here
     n = np.asarray(n_layers)
     if n.ndim == 1:
         n = np.repeat(n[:, None], lam.size, axis=1)
-    if n.shape != (t.size, lam.size):
+    if n.shape != (t.shape[0], lam.size):
         raise ValueError("n_layers must be (N,) or (N, L)")
     if np.any(np.imag(n) < 0) or np.any(np.imag(np.asarray(n_sub)) < 0):
         raise ValueError("negative Im(n) (gain) is out of scope; "
