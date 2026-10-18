@@ -71,5 +71,33 @@ def test_tutorial_spectra_to_twin():
     np.testing.assert_allclose(twin, true, rtol=0.1)
 
 
+def test_tutorial_monitored_run():
+    """The printed numbers, and checks that do not depend on them: with
+    independent noise at every stop the whole-run error of a layer is
+    never below its error alone (the diagonal of G G^T is at least
+    G_jj^2); the simulated scatter agrees with the linear prediction
+    within 4 standard errors plus 5 % (second-order effects); the twin's
+    CVaR agrees with the simulated runs' to 3e-5; and the paired
+    difference has a confidence interval that excludes zero."""
+    got, want = _run("tutorial_monitored_run.py")
+    _same_numbers(got, want)
+    text = "\n".join(got)
+    rows = [list(map(float, NUM.findall(line))) for line in got
+            if re.match(r"\s+\d+\s+\d+\.\d+\s+\d+\.\d+\s+\d", line)]
+    assert len(rows) == 8
+    for _, alone, whole, sim, se in rows:
+        assert whole >= alone - 1e-3
+        assert abs(sim - whole) <= 4 * se + 0.05 * whole
+    for m in re.finditer(r"simulated runs (\S+) \+/- \S+, twin (\S+)", text):
+        assert abs(float(m.group(1)) - float(m.group(2))) < 3e-5
+    lo = float(re.search(r"interval (\S+) to", text).group(1))
+    assert lo > 0
+    pred = np.array(NUM.findall(re.search(r"predicted: \[(.*)\]",
+                                          text).group(1)), float)
+    sim = np.array(NUM.findall(re.search(r"simulated: \[(.*)\]",
+                                         text).group(1)), float)
+    assert np.max(np.abs(pred - sim)) < 0.06
+
+
 if __name__ == "__main__":                       # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
