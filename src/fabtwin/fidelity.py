@@ -83,7 +83,7 @@ def distribution_distances(j_model, j_ref, alpha=0.05):
 
 def induced_merits(x, t_um, n0, lam_um, shape, weights, const,
                    n_inc=1.0, n_sub=1.0, t_clip=None, n_clip=None,
-                   model=None):
+                   model=None) -> np.ndarray:
     """Merit of one design under each error vector in x (K, 2N),
     through the exact solver. Optional (lo, hi) clips mirror the
     physical fabrication window used during robustification."""
@@ -97,16 +97,19 @@ def induced_merits(x, t_um, n0, lam_um, shape, weights, const,
     if n_clip is not None:
         nn = np.clip(nn, *n_clip)
     J = np.empty(x.shape[0])
+    if model is None:
+        # all error vectors in one solver call (new in 0.11.0; equal to
+        # the former per-vector loop to rounding)
+        T = tmm._transmittance_batch(lam_um, tt, nn, S, n_inc, n_sub)
+        w = np.asarray(weights)
+        for k in range(x.shape[0]):
+            J[k] = tmm.merit(T[k], w, const)
+        return J
+    from .merits import model_spectra
     for k in range(x.shape[0]):
-        if model is not None:
-            from .merits import model_spectra
-            R_, T_, A_ = model_spectra(model, lam_um, tt[k], nn[k], S,
-                                       n_inc, n_sub)
-            J[k] = model.merit(R_, T_, A_)[0]
-            continue
-        T = tmm.transmittance(lam_um, tt[k], nn[k][:, None] * S,
-                              n_inc, n_sub)
-        J[k] = tmm.merit(T, weights, const)
+        R_, T_, A_ = model_spectra(model, lam_um, tt[k], nn[k], S,
+                                   n_inc, n_sub)
+        J[k] = model.merit(R_, T_, A_)[0]
     return J
 
 
@@ -169,7 +172,8 @@ def energy_distance(a, b):
     return 2.0 * mean_dist(a, b) - mean_dist(a, a) - mean_dist(b, b)
 
 
-def drift_test(x_old, x_new, n_perm=999, seed=0, standardize=True):
+def drift_test(x_old, x_new, n_perm: int = 999, seed=0,
+               standardize: bool = True) -> dict:
     """Permutation test of "the new runs come from the same process as
     the old ones", on error vectors (from `errors_from_traces`).
 
@@ -177,7 +181,9 @@ def drift_test(x_old, x_new, n_perm=999, seed=0, standardize=True):
     built by reshuffling the pooled runs n_perm times, and the p-value
     (1 + #{permuted >= observed}) / (1 + n_perm) is valid at every
     sample size when the runs are exchangeable under the null (the
-    standard permutation argument). standardize=True scales every
+    standard permutation argument; since 0.11.0 permuted statistics
+    within round-off of the observed one count as ties, as that argument
+    needs). standardize=True scales every
     component by the pooled standard deviation first, so thickness and
     index errors count alike.
 
@@ -203,11 +209,25 @@ def drift_test(x_old, x_new, n_perm=999, seed=0, standardize=True):
         pool = (pool - pool.mean(axis=0)) / sd
     K = a.shape[0]
     obs = energy_distance(pool[:K], pool[K:])
+    # a permutation that reproduces the observed split (or, with equal
+    # group sizes, swaps the two groups) has the same statistic exactly,
+    # but recomputed from reordered rows it can come out a few units of
+    # the last digit below obs, and was then not counted (0.10.x and
+    # earlier): with few runs the p-value came out too small (2 + 2
+    # well-separated runs, data seed 1 of the tests: 0.036 instead of
+    # 0.315, although no p-value below 1/3 is possible then). Values
+    # within round-off of obs now count as ties, as the permutation
+    # argument requires. The round-off of a mean of pairwise distances
+    # is a few eps times their size, so 1e-9 of the mean pairwise
+    # distance of the pooled runs separates ties from real differences
+    # with a wide margin (new in 0.11.0).
+    from scipy.spatial.distance import cdist
+    tol = 1e-9 * float(cdist(pool, pool).mean())
     rng = np.random.default_rng(seed)
     count = 0
     for _ in range(n_perm):
         p = rng.permutation(pool.shape[0])
-        if energy_distance(pool[p[:K]], pool[p[K:]]) >= obs:
+        if energy_distance(pool[p[:K]], pool[p[K:]]) >= obs - tol:
             count += 1
     return dict(statistic=float(obs),
                 p_value=(1.0 + count) / (1.0 + n_perm),

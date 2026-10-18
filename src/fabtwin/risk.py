@@ -244,8 +244,8 @@ def cvar_difference(values, baseline, alpha, confidence=0.95,
 
 
 def evaluate_under_process(sampler, t_um, n0, lam_um, shape, weights,
-                           const, K, n_inc=1.0, n_sub=1.0, alpha=0.05,
-                           model=None):
+                           const, K: int, n_inc=1.0, n_sub=1.0,
+                           alpha: float = 0.05, model=None) -> dict:
     """Score a design by K fresh draws from `sampler(t, n, K)` ->
     (t_tilde (K,N), n_tilde (K,N)) -- the reference process, a twin,
     or anything else with that signature. Returns tail_statistics of
@@ -257,16 +257,20 @@ def evaluate_under_process(sampler, t_um, n0, lam_um, shape, weights,
     if S.ndim == 1:
         S = np.broadcast_to(S[None, :], (len(t_um), S.size))
     J = np.empty(K)
-    for k in range(K):
-        if model is not None:
-            from .merits import model_spectra
+    if model is None:
+        # all K draws in one solver call (new in 0.11.0; equal to the
+        # former per-draw loop to rounding, see tmm._transmittance_batch)
+        T = tmm._transmittance_batch(lam_um, np.asarray(tt)[:K],
+                                     np.asarray(nt)[:K], S, n_inc, n_sub)
+        w = np.asarray(weights)
+        for k in range(K):
+            J[k] = tmm.merit(T[k], w, const)
+    else:
+        from .merits import model_spectra
+        for k in range(K):
             R_, T_, A_ = model_spectra(model, lam_um, tt[k], nt[k], S,
                                        n_inc, n_sub)
             J[k] = model.merit(R_, T_, A_)[0]
-            continue
-        nlay = np.asarray(nt[k])[:, None] * S
-        T = tmm.transmittance(lam_um, tt[k], nlay, n_inc, n_sub)
-        J[k] = tmm.merit(T, weights, const)
     out = tail_statistics(J, alpha)
     out["samples"] = J
     return out

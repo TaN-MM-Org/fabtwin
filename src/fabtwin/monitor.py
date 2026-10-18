@@ -52,7 +52,10 @@ Scope, stated plainly: the plan is for the recipe as designed. It
 does not follow how an error made in one layer changes the curves of
 the layers after it (in a real run the cut-offs are often recomputed
 after every layer), and it does not model drift of the monitor or of
-the deposition rate. The monitor beam arrives from the incidence medium
+the deposition rate. Since 0.11.0, `monitoring_errors` carries the
+errors of each layer into the stops of the layers after it (cut-offs
+fixed from the recipe), and `simulate_monitored_runs` simulates such
+runs without linearization; see their docstrings. The monitor beam arrives from the incidence medium
 (`n_inc`, the chamber's vacuum, 1.0, by default) on the growing side
 of the coating.
 """
@@ -65,7 +68,8 @@ import numpy as np
 
 from .gradients import _rta_and_grads
 
-__all__ = ["MonitoringPlan", "monitoring_plan"]
+__all__ = ["MonitoringPlan", "monitoring_plan", "MonitoringErrors",
+           "monitoring_errors", "simulate_monitored_runs"]
 
 
 @dataclasses.dataclass
@@ -261,3 +265,427 @@ def monitoring_plan(lam_mon_um: float, recipe_t_um, n_layers, n_inc=1.0,
         cutoff=cutoff, slope=slope, turning_points=tp, slope_ratio=ratio,
         sigma_signal=sigma_signal, sigma_t=sigma_t, rel_sigma_t=sigma_t / t,
         nonlinearity=nonlin, curves=curves)
+
+
+# ----------------------------------------------------------------------
+# Whole runs: how the errors of one layer carry into the next (0.11.0)
+
+
+@dataclasses.dataclass
+class MonitoringErrors:
+    """The thickness errors of a whole level-monitored run, to first
+    order in the signal errors (from `monitoring_errors`).
+
+    Arrays of length N are indexed like the recipe (layer 0 next to the
+    incidence medium; layer N - 1 is deposited first, see `order`);
+    thicknesses and their errors are in um.
+
+    recipe_t_um : (N,) the recipe; lam_mon_um, quantity : as in
+        `MonitoringPlan`; order : (N,) deposition order.
+    sigma_signal, signal_offset : the stated one-sigma noise of the
+        monitor signal at each stop, and a constant offset of the
+        measured signal (a calibration error), both as fractions.
+    sensitivity : (N, N) A[j, k] = d S_j / d t_k at the recipe, where
+        S_j is the true signal at the moment layer j is stopped; it
+        depends on layer j and on the layers below it (k >= j), so A is
+        upper triangular.
+    propagation : (N, N) G = -A^-1, the thickness errors per unit
+        signal error at each stop: dt = G (e + signal_offset), with e
+        the (N,) noise at the stops.
+    mean_t : (N,) G applied to the offset (zero without an offset).
+    covariance : (N, N) sigma_signal^2 G G^T; sigma_t : (N,) the square
+        roots of its diagonal; correlation : (N, N).
+    rel_mean_t, rel_sigma_t, rel_covariance : the same for the relative
+        errors dt / t (the package's error vectors).
+    sigma_t_independent : (N,) sigma_signal / |A[j, j]|, the error each
+        layer would have if the layers below it were exact; this is the
+        `sigma_t` of `monitoring_plan`.
+    nonlinearity : (N,) |S_j''| sqrt(sigma_t^2 + mean_t^2) / (2 |A[j, j]|),
+        the size of the second-order term of layer j's own monitoring
+        curve over its error, relative to the first-order term.
+    """
+
+    recipe_t_um: np.ndarray
+    lam_mon_um: float
+    quantity: str
+    order: np.ndarray
+    sigma_signal: float
+    signal_offset: float
+    sensitivity: np.ndarray
+    propagation: np.ndarray
+    mean_t: np.ndarray
+    covariance: np.ndarray
+    sigma_t: np.ndarray
+    correlation: np.ndarray
+    rel_mean_t: np.ndarray
+    rel_sigma_t: np.ndarray
+    rel_covariance: np.ndarray
+    sigma_t_independent: np.ndarray
+    nonlinearity: np.ndarray
+
+    def twin(self):
+        """A `GaussianTwin` of this monitored run: relative thickness
+        errors with mean `rel_mean_t` and covariance `rel_covariance`,
+        index errors exactly zero (the monitor model says nothing about
+        them). It describes runs of THIS recipe; a design that moves far
+        from it has other monitoring curves and needs its own."""
+        from .twins import GaussianTwin
+        N = self.recipe_t_um.size
+        tw = GaussianTwin.__new__(GaussianTwin)
+        tw.dim = 2 * N
+        tw.mu = np.concatenate([self.rel_mean_t, np.zeros(N)])
+        cov = np.zeros((2 * N, 2 * N))
+        C = 0.5 * (self.rel_covariance + self.rel_covariance.T)
+        cov[:N, :N] = C
+        tw.cov = cov
+        L = np.zeros((2 * N, 2 * N))
+        L[:N, :N] = np.linalg.cholesky(C)
+        tw.L = L
+        tw.diagonal = False
+        return tw
+
+
+def _check_run_inputs(lam_mon_um, recipe_t_um, n_layers, quantity):
+    """The input checks of `monitoring_plan`, for the whole-run tools."""
+    lam_mon = float(lam_mon_um)
+    if not (np.isfinite(lam_mon) and lam_mon > 0):
+        raise ValueError("lam_mon_um must be a positive wavelength (um)")
+    t = np.asarray(recipe_t_um, dtype=float)
+    n = np.asarray(n_layers)
+    if t.ndim != 1 or t.size < 1 or n.shape != t.shape:
+        raise ValueError("recipe_t_um and n_layers must be (N,) arrays of "
+                         "one length (indices at the monitor wavelength)")
+    if not np.all(np.isfinite(t)) or np.any(t <= 0):
+        raise ValueError("recipe thicknesses must be positive and finite")
+    if not np.all(np.isfinite(n)) or np.any(np.real(n) <= 0):
+        raise ValueError("layer indices must be finite with a positive "
+                         "real part")
+    if quantity not in ("T", "R"):
+        raise ValueError("quantity must be 'T' or 'R'")
+    return lam_mon, t, n
+
+
+def _quarter_wave(lam_mon, nj, n_inc, theta0_rad):
+    s0 = float(np.real(n_inc)) * np.sin(float(theta0_rad))
+    q = np.sqrt(complex(nj) ** 2 - s0 ** 2)
+    return lam_mon / (4.0 * max(abs(np.real(q)), 1e-12))
+
+
+def _partial_signal(lam_mon, t_cols, n_part, n_inc, n_sub, theta, pol,
+                    n_exit, quantity):
+    """Signal of partial stacks, one per column of t_cols (Np, M) (top
+    layer first), all of indices n_part (Np,), and the exact derivatives
+    with respect to every layer thickness, (Np, M)."""
+    M = t_cols.shape[1]
+    lam = np.full(M, lam_mon)
+    n2 = np.repeat(np.asarray(n_part).reshape(-1, 1), M, axis=1)
+    g = _rta_and_grads(lam, t_cols, n2, n_inc, n_sub, theta, pol, n_exit)
+    return g[quantity], g[f"d{quantity}_dt"]
+
+
+def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
+                      sigma_signal: float, n_inc=1.0, n_sub=1.52,
+                      quantity: str = "T", theta0_rad: float = 0.0,
+                      pol: str = "s", n_exit=None,
+                      signal_offset: float = 0.0,
+                      max_nonlinearity: float = 0.1) -> MonitoringErrors:
+    """Thickness errors of a whole level-monitored run, with the errors
+    of each layer carried into the layers after it (new in 0.11.0).
+
+    `monitoring_plan` gives each layer's error as if the layers below it
+    were exact. In a real run they are not: layer j is stopped when the
+    signal of the stack AS DEPOSITED reaches the cut-off computed from
+    the recipe, so the errors already made shift its stop. To first
+    order, with S_j the true signal when layer j is stopped (a function
+    of t_j and of the thicknesses below it), e_j the signal noise at
+    that stop and o a constant offset of the measured signal,
+
+        sum over k >= j of A[j, k] dt_k = -(e_j + o),
+        A[j, k] = d S_j / d t_k at the recipe,
+
+    so dt = G (e + o) with G = -A^-1, and for independent noise of
+    standard deviation sigma_signal at every stop
+
+        mean(dt) = o G 1,   cov(dt) = sigma_signal^2 G G^T.
+
+    The derivatives are the exact ones of `fabtwin.gradients`. The
+    errors of different layers are correlated, and an error can grow or
+    partly cancel from layer to layer, depending on the monitor
+    wavelength.
+
+    lam_mon_um, recipe_t_um, n_layers, n_inc, n_sub, quantity,
+    theta0_rad, pol, n_exit : as in `monitoring_plan` (indices at the
+        monitor wavelength).
+    sigma_signal : one-sigma noise of the signal at each stop, as a
+        fraction (required, > 0).
+    signal_offset : a constant error of the measured signal, the same at
+        every stop (for example a calibration offset of the monitor), as
+        a fraction; default 0.
+    max_nonlinearity : refusal threshold on `nonlinearity` (as in
+        `monitoring_plan`, but with the propagated error of each layer).
+
+    Returns a `MonitoringErrors`; `.twin()` turns it into a
+    `GaussianTwin` for `evaluate_under_process` or `robustify`.
+
+    Refused (ValueError): the input errors `monitoring_plan` refuses, a
+    sigma_signal that is not positive, a non-finite offset, a layer whose
+    signal does not change at its cut-off (A[j, j] = 0), and a run in
+    which some layer ends so close to a turning point that the first
+    order cannot be trusted (`nonlinearity` above `max_nonlinearity`;
+    the message names the layers). The model: the cut-offs are fixed
+    from the recipe before the run (not recomputed during it), the
+    noise at different stops is independent, and nothing else
+    (deposition rate, index, monitor drift) changes during the run.
+    `simulate_monitored_runs` simulates the same model without the
+    linearization; the tests compare the two.
+    """
+    lam_mon, t, n = _check_run_inputs(lam_mon_um, recipe_t_um, n_layers,
+                                      quantity)
+    sig = float(sigma_signal)
+    if not (np.isfinite(sig) and sig > 0):
+        raise ValueError("sigma_signal must be positive and finite (a "
+                         "fraction: 0.001 for 0.1 %)")
+    off = float(signal_offset)
+    if not np.isfinite(off):
+        raise ValueError("signal_offset must be finite")
+    mnl = float(max_nonlinearity)
+    if not (mnl > 0):
+        raise ValueError("max_nonlinearity must be positive")
+    N = t.size
+    A = np.zeros((N, N))
+    S2 = np.empty(N)
+    for j in range(N):
+        _, d = _partial_signal(lam_mon, t[j:, None], n[j:], n_inc, n_sub,
+                               theta0_rad, pol, n_exit, quantity)
+        A[j, j:] = d[:, 0]
+        # S'' of layer j's own curve: a central difference of the exact
+        # slope, as in monitoring_plan
+        h = 1e-4 * _quarter_wave(lam_mon, n[j], n_inc, theta0_rad)
+        lo = max(t[j] - h, 0.0)
+        cols = np.repeat(t[j:, None], 2, axis=1)
+        cols[0] = (lo, t[j] + h)
+        _, d2 = _partial_signal(lam_mon, cols, n[j:], n_inc, n_sub,
+                                theta0_rad, pol, n_exit, quantity)
+        S2[j] = (d2[0, 1] - d2[0, 0]) / (t[j] + h - lo)
+    diag = np.diag(A)
+    if np.any(diag == 0.0):
+        bad = ", ".join(str(i) for i in np.nonzero(diag == 0.0)[0])
+        raise ValueError(f"layer(s) {bad}: the monitor signal does not "
+                         "change at the cut-off (a turning point), so the "
+                         "stop is not determined to first order")
+    # A is upper triangular: G = -A^-1 by back substitution
+    from scipy.linalg import solve_triangular
+    G = -solve_triangular(A, np.eye(N), lower=False)
+    mean = G @ np.full(N, off)
+    cov = sig ** 2 * (G @ G.T)
+    cov = 0.5 * (cov + cov.T)
+    sd = np.sqrt(np.diag(cov))
+    nonlin = np.abs(S2) * np.sqrt(sd ** 2 + mean ** 2) / (2.0 * np.abs(diag))
+    bad = ~(nonlin <= mnl)
+    if np.any(bad):
+        names = ", ".join(str(int(i)) for i in np.nonzero(bad)[0])
+        raise ValueError(
+            f"layer(s) {names} end too close to a turning point of the "
+            f"monitor signal at {lam_mon:g} um for the errors they receive "
+            f"(nonlinearity above {mnl:g}): a first-order result would not "
+            "be trustworthy. Monitor at another wavelength, or use "
+            "simulate_monitored_runs")
+    rel_cov = cov / np.outer(t, t)
+    return MonitoringErrors(
+        recipe_t_um=t.copy(), lam_mon_um=lam_mon, quantity=quantity,
+        order=np.arange(N - 1, -1, -1), sigma_signal=sig,
+        signal_offset=off, sensitivity=A, propagation=G, mean_t=mean,
+        covariance=cov, sigma_t=sd, correlation=cov / np.outer(sd, sd),
+        rel_mean_t=mean / t, rel_sigma_t=sd / t, rel_covariance=rel_cov,
+        sigma_t_independent=sig / np.abs(diag), nonlinearity=nonlin)
+
+
+def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
+                            sigma_signal: float | None = None,
+                            n_runs: int | None = None, seed=0, noise=None,
+                            n_inc=1.0, n_sub=1.52, quantity: str = "T",
+                            theta0_rad: float = 0.0, pol: str = "s",
+                            n_exit=None,
+                            signal_offset: float = 0.0) -> np.ndarray:
+    """Simulate level-monitored runs layer by layer, without any
+    linearization (new in 0.11.0).
+
+    Each run deposits the layers in order (layer N - 1 first). Layer j
+    grows on the stack as actually deposited in that run and is stopped
+    when the measured signal, true signal + signal_offset + noise,
+    reaches the cut-off computed from the recipe (the value
+    `monitoring_plan` reports): the stop thickness solves
+
+        S_j(tau; layers below as deposited) = cutoff_j - offset - e_j
+
+    on the branch of layer j's monitoring curve that contains the recipe
+    thickness (between its neighboring turning points), by bisection on
+    the forward optics (`fabtwin.tmm.stack_rt`, one column per run), to
+    about 1e-15 um; the exact slopes of `fabtwin.gradients` only locate
+    the turning points.
+
+    lam_mon_um, recipe_t_um, n_layers, n_inc, n_sub, quantity,
+    theta0_rad, pol, n_exit, signal_offset : as in `monitoring_errors`.
+    sigma_signal, n_runs, seed : draw the noise e as independent normal
+        values of standard deviation sigma_signal, (n_runs, N), from
+        `numpy.random.default_rng(seed)` (seed may also be a Generator);
+    noise : or give the noise at every stop directly, (n_runs, N), with
+        noise[r, j] the signal error when layer j of run r is stopped.
+
+    Returns (n_runs, N) deposited thicknesses (um), indexed like the
+    recipe. A stop that cannot happen on that branch (the noise or the
+    errors below move the target past a turning point, so the signal
+    turns before reaching it, or had passed it before the branch began)
+    makes that layer and the layers after it in that run NaN, with a
+    RuntimeWarning that counts such runs. A real controller that counts
+    turning points would stop such a layer at the turning point or miss
+    it; either way the run is not the level-monitored run modeled here.
+    """
+    lam_mon, t, n = _check_run_inputs(lam_mon_um, recipe_t_um, n_layers,
+                                      quantity)
+    N = t.size
+    off = float(signal_offset)
+    if not np.isfinite(off):
+        raise ValueError("signal_offset must be finite")
+    if noise is not None:
+        if sigma_signal is not None or n_runs is not None:
+            raise ValueError("give either noise, or sigma_signal and "
+                             "n_runs, not both")
+        e = np.asarray(noise, dtype=float)
+        if e.ndim != 2 or e.shape[1] != N or e.shape[0] < 1 or \
+                not np.all(np.isfinite(e)):
+            raise ValueError("noise must be a finite (n_runs, N) array")
+    else:
+        if sigma_signal is None or n_runs is None:
+            raise ValueError("give sigma_signal and n_runs (or noise)")
+        sig = float(sigma_signal)
+        if not (np.isfinite(sig) and sig >= 0):
+            raise ValueError("sigma_signal must be finite and >= 0")
+        if int(n_runs) != n_runs or int(n_runs) < 1:
+            raise ValueError("n_runs must be a whole number >= 1")
+        rng = seed if isinstance(seed, np.random.Generator) else \
+            np.random.default_rng(seed)
+        e = rng.normal(0.0, 1.0, (int(n_runs), N)) * sig
+    K = e.shape[0]
+    out = np.full((K, N), np.nan)
+    alive = np.ones(K, dtype=bool)
+    eps = np.finfo(float).eps
+
+    from .tmm import stack_rt
+    qi = 0 if quantity == "R" else 1
+
+    def columns(j, tau, rows):
+        cols = np.empty((N - j, rows.size))
+        cols[0] = tau
+        cols[1:] = out[rows][:, j + 1:].T
+        return cols
+
+    def val_at(j, tau, rows):
+        # the signal from the forward solver alone (stack_rt, one column
+        # per run); the gradient module is used only for slope signs
+        M = rows.size
+        n2 = np.repeat(np.asarray(n[j:]).reshape(-1, 1), M, axis=1)
+        return stack_rt(np.full(M, lam_mon), columns(j, tau, rows), n2,
+                        n_inc, n_sub, theta0_rad, pol, n_exit)[qi]
+
+    def sig_at(j, tau, rows):
+        _, d = _partial_signal(lam_mon, columns(j, tau, rows), n[j:], n_inc,
+                               n_sub, theta0_rad, pol, n_exit, quantity)
+        return val_at(j, tau, rows), d[0]
+
+    for j in range(N - 1, -1, -1):
+        cut = stack_rt([lam_mon], t[j:], n[j:], n_inc, n_sub, theta0_rad,
+                       pol, n_exit)[qi]
+        rows = np.nonzero(alive)[0]
+        if rows.size == 0:
+            break
+        target = cut[0] - off - e[rows, j]
+        qw = _quarter_wave(lam_mon, n[j], n_inc, theta0_rad)
+        x0 = np.full(rows.size, t[j])
+        v0, s0 = sig_at(j, x0, rows)
+        f0 = v0 - target
+        sgn_s = np.sign(s0)
+        # direction from the recipe thickness towards the root on this
+        # branch of the curve
+        d = np.where(f0 * s0 > 0, -1.0, 1.0)
+        a = x0.copy()
+        b = x0.copy()
+        done = (f0 == 0.0) | (s0 == 0.0)
+        missed = s0 == 0.0
+        step = np.abs(f0) / np.where(s0 != 0, np.abs(s0), 1.0) * 1.5 \
+            + 1e-9 * qw
+        found = done.copy()
+        for _ in range(80):
+            todo = ~found
+            if not np.any(todo):
+                break
+            nb = np.maximum(a[todo] + d[todo] * step[todo], 0.0)
+            vb, sb = sig_at(j, nb, rows[todo])
+            fnb = vb - target[todo]
+            turned = np.sign(sb) != sgn_s[todo]
+            crossed = (np.sign(fnb) != np.sign(f0[todo])) & ~turned
+            idx = np.nonzero(todo)[0]
+            # a turning point between a and nb: find it (bisection on
+            # the sign of the slope); the root is before it only if the
+            # signal crosses the target before turning
+            if np.any(turned):
+                ti = idx[turned]
+                lo_, hi_ = a[ti].copy(), nb[turned].copy()
+                for _ in range(200):
+                    mid = 0.5 * (lo_ + hi_)
+                    _, sm = sig_at(j, mid, rows[ti])
+                    same = np.sign(sm) == sgn_s[ti]
+                    lo_ = np.where(same, mid, lo_)
+                    hi_ = np.where(same, hi_, mid)
+                    if np.all(np.abs(hi_ - lo_) <= 4 * eps * hi_):
+                        break
+                vt = val_at(j, lo_, rows[ti])
+                ok = np.sign(vt - target[ti]) != np.sign(f0[ti])
+                b[ti[ok]] = lo_[ok]
+                found[ti] = True
+                missed[ti[~ok]] = True
+            at_zero = (nb == 0.0) & ~crossed & ~turned
+            if np.any(at_zero):
+                missed[idx[at_zero]] = True
+                found[idx[at_zero]] = True
+            ci = idx[crossed]
+            b[ci] = nb[crossed]
+            found[ci] = True
+            keep = idx[~crossed & ~turned & ~at_zero]
+            a[keep] = nb[~crossed & ~turned & ~at_zero]
+            step[keep] *= 2.0
+            far = np.abs(a[keep] - t[j]) > 2.0 * qw
+            missed[keep[far]] = True
+            found[keep[far]] = True
+        missed |= ~found
+        # bisection between a and b, with f(a) on the side of f0
+        lo_ = np.minimum(a, b)
+        hi_ = np.maximum(a, b)
+        live = ~done & ~missed
+        for _ in range(200):
+            if not np.any(live):
+                break
+            li = np.nonzero(live)[0]
+            mid = 0.5 * (lo_[li] + hi_[li])
+            vm = val_at(j, mid, rows[li])
+            fm = vm - target[li]
+            # f is monotone on [lo, hi], increasing when the slope sign
+            # is +1: the root is right of mid when f(mid) has the sign
+            # of -slope
+            left = np.sign(fm) == np.sign(-sgn_s[li])
+            lo_[li] = np.where(left, mid, lo_[li])
+            hi_[li] = np.where(left, hi_[li], mid)
+            live[li] = np.abs(hi_[li] - lo_[li]) > 4 * eps * hi_[li]
+        stop = np.where(done & ~missed, x0, 0.5 * (lo_ + hi_))
+        good = ~missed
+        out[rows[good], j] = stop[good]
+        alive[rows[missed]] = False
+    n_missed = int(np.sum(~alive))
+    if n_missed:
+        warnings.warn(
+            f"{n_missed} of {K} simulated runs missed a stop (the target "
+            "signal is not reached on the branch of that layer's curve "
+            "between its turning points); their remaining thicknesses "
+            "are NaN", RuntimeWarning,
+            stacklevel=2)
+    return out

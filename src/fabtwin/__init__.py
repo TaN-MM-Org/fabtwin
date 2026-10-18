@@ -45,9 +45,10 @@ from .merits import (FunctionMerit, LinearMerit, OpticalModel,
                      SpecMarginMerit, TargetMerit, model_merit_and_grad,
                      model_spectra)
 from .correct import reoptimize_remaining
-from .monitor import MonitoringPlan, monitoring_plan
+from .monitor import (MonitoringErrors, MonitoringPlan, monitoring_errors,
+                      monitoring_plan, simulate_monitored_runs)
 
-__version__ = "0.10.1"
+__version__ = "0.11.0"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",
@@ -83,4 +84,6 @@ __all__ = [
     "load_spectrum_csv", "recovery_precision", "RecoveryPlan",
     # new in 0.10.0
     "monitoring_plan", "MonitoringPlan",
+    # new in 0.11.0
+    "monitoring_errors", "MonitoringErrors", "simulate_monitored_runs",
 ]

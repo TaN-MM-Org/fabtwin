@@ -70,7 +70,9 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
     n = np.asarray(n_layers)
     if n.ndim == 1:                     # dispersionless layers
         n = np.repeat(n[:, None], lam.size, axis=1)
-    if n.shape != (t.size, lam.size):
+    if t.ndim not in (1, 2) or (t.ndim == 2 and t.shape[1] != lam.size):
+        raise ValueError("t_um must be (N,) layer thicknesses")
+    if n.shape != (t.shape[0], lam.size):
         raise ValueError("n_layers must be (N,) or (N, L) matching "
                          "t_um and lam_um")
     # convention: n + i k with k >= 0 is ABSORBING (the common Python
@@ -110,7 +112,12 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
     cos_l = _cos_branch(n, s0)
     cos_sub = _cos_branch(n_sub_arr, s0)
     cos_0 = _cos_branch(n_inc, s0)
-    delta = 2.0 * np.pi * n * cos_l * t[:, None] / lam[None, :]
+    # t is (N,) on every public path; internally (new in 0.11.0) it may
+    # be (N, L), one thickness per layer and column, which lets
+    # _transmittance_batch put many designs side by side along the
+    # column axis
+    tc = t if t.ndim == 2 else t[:, None]
+    delta = 2.0 * np.pi * n * cos_l * tc / lam[None, :]
     if pol == "p" and np.any(np.abs(cos_sub) == 0.0):
         raise ValueError("the substrate is exactly at its critical angle; "
                          "the p admittance n / cos(theta) is infinite "
@@ -210,6 +217,59 @@ def _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol,
     if np.any(big):
         T = np.where(big, T * np.exp(-2.0 * np.where(big, msum, 0.0)), T)
     return R, T
+
+
+# Many designs at once (new in 0.11.0). The per-design loops of
+# `evaluate_under_process`, `induced_merits` and the probes of
+# `inverse_design` and `random_search` called `transmittance` once per
+# design. Here the designs sit side by side along the column axis of one
+# call of the same solver (column k * L + l is design k at wavelength
+# l), in chunks of about _BATCH_COLUMNS layer-column values. Every
+# column goes through the same element-wise operations as the
+# single-design call; the tests compare the two to 1e-12 of the largest
+# value, not bit for bit, because vectorized math kernels may round the
+# last digit differently on other processors.
+_BATCH_COLUMNS = 2 ** 15
+
+
+def _transmittance_batch(lam_um, t_k, n_k, shape, n_inc=1.0, n_sub=1.0):
+    """Normal-incidence T (K, L) of K lossless or absorbing designs.
+
+    t_k : (K, N) thicknesses; n_k : (K, N) indices at the reference
+    wavelength; shape : (L,) or (N, L) real dispersion shape, so that
+    design k has layer indices n_k[k][:, None] * shape, exactly as the
+    per-design loops built them. Equal, to rounding, to K calls of
+    `transmittance(lam_um, t_k[k], n_k[k][:, None] * shape, n_inc,
+    n_sub)`.
+    """
+    lam = np.asarray(lam_um, dtype=float)
+    t_k = np.asarray(t_k, dtype=float)
+    n_k = np.asarray(n_k)
+    if t_k.ndim != 2 or n_k.shape != t_k.shape:
+        raise ValueError("t_k and n_k must be (K, N) arrays of one shape")
+    K, N = t_k.shape
+    L = lam.size
+    S = np.asarray(shape)
+    if S.ndim == 1:
+        S = np.broadcast_to(S[None, :], (N, L))
+    if S.shape != (N, L):
+        raise ValueError("shape must be (L,) or (N, L)")
+    ns = np.asarray(n_sub)
+    if ns.ndim == 0:
+        ns = np.full(L, ns)
+    if ns.shape != (L,):
+        raise ValueError("n_sub must be a scalar or (L,)")
+    T = np.empty((K, L))
+    step = max(1, int(_BATCH_COLUMNS // max(1, N * L)))
+    for a in range(0, K, step):
+        b = min(K, a + step)
+        k = b - a
+        tt = np.repeat(t_k[a:b].T, L, axis=1)                  # (N, k L)
+        nn = (n_k[a:b].T[:, :, None] * S[:, None, :]).reshape(N, k * L)
+        _, Tc = _coherent_rt(np.tile(lam, k), tt, nn, n_inc,
+                             np.tile(ns, k), 0.0, "s")
+        T[a:b] = Tc.reshape(k, L)
+    return T
 
 
 def _thick_substrate_media(lam_um, n_inc, n_sub, n_exit, theta0_rad):
@@ -355,21 +415,39 @@ def _check_band_args(**kw):
                              "(a negative width makes the bands overlap)")
 
 
+def _edge_tol(lam):
+    """Tolerance for a wavelength that lies on a band edge (new in
+    0.11.0). An edge such as c + h is computed in binary floating point
+    and can land just inside a grid point that is exactly on the edge
+    in decimal: 0.5325 + 0.0125 is 0.5449999999999999, so the grid
+    point 0.545 fell outside the stop band [0.52, 0.545]. Up to 0.10.x
+    such edge points were dropped from one side of a band and kept on
+    the other. A point within 1e-9 of the largest wavelength (1e-9 um
+    for wavelengths near 1 um) of an edge now counts as on it; a real
+    grid is far coarser than that."""
+    return 1e-9 * float(np.max(np.abs(lam))) if lam.size else 0.0
+
+
 def notch_weights(lam_um, center_um: float, half_um: float,
-                  guard_um: float):
+                  guard_um: float) -> tuple:
     """Weights (w, const) of the fluorescence-rejection notch merit
 
         J = 0.5 * mean_pass T + 0.5 * mean_stop (1 - T) = w . T + const
 
     with stop band [c-h, c+h] and pass bands outside the guard
     [c-h-g, c+h+g] (Mahim et al., IEEE Sensors J., 2026, Eq. 2).
-    half_um and guard_um must be >= 0 (checked since 0.9.0).
+    half_um and guard_um must be >= 0 (checked since 0.9.0). A
+    wavelength exactly on an edge belongs to the band, also when
+    floating-point round-off puts the computed edge just past it
+    (since 0.11.0; see `_edge_tol`).
     """
     _check_band_args(half_um=half_um, guard_um=guard_um)
     lam = np.asarray(lam_um, dtype=float)
-    stop = (lam >= center_um - half_um) & (lam <= center_um + half_um)
-    pas = (lam <= center_um - half_um - guard_um) | \
-          (lam >= center_um + half_um + guard_um)
+    tol = _edge_tol(lam)
+    stop = (lam >= center_um - half_um - tol) & \
+           (lam <= center_um + half_um + tol)
+    pas = (lam <= center_um - half_um - guard_um + tol) | \
+          (lam >= center_um + half_um + guard_um - tol)
     if not stop.any() or not pas.any():
         raise ValueError("band layout leaves an empty stop or pass band "
                          "on this wavelength grid")
@@ -377,14 +455,18 @@ def notch_weights(lam_um, center_um: float, half_um: float,
     return w, 0.5
 
 
-def bandpass_weights(lam_um, lo_um: float, hi_um: float, guard_um: float):
+def bandpass_weights(lam_um, lo_um: float, hi_um: float,
+                     guard_um: float) -> tuple:
     """Weights of the dual bandpass merit: J = 0.5 mean_in T
     + 0.5 mean_out (1 - T), pass band [lo, hi], rejection outside the
-    guard. guard_um must be >= 0 (checked since 0.9.0)."""
+    guard. guard_um must be >= 0 (checked since 0.9.0). Edge points
+    belong to their band (since 0.11.0, as in `notch_weights`)."""
     _check_band_args(guard_um=guard_um)
     lam = np.asarray(lam_um, dtype=float)
-    inside = (lam >= lo_um) & (lam <= hi_um)
-    outside = (lam <= lo_um - guard_um) | (lam >= hi_um + guard_um)
+    tol = _edge_tol(lam)
+    inside = (lam >= lo_um - tol) & (lam <= hi_um + tol)
+    outside = (lam <= lo_um - guard_um + tol) | \
+        (lam >= hi_um + guard_um - tol)
     if not inside.any() or not outside.any():
         raise ValueError("band layout leaves an empty band on this grid")
     w = 0.5 * inside / inside.sum() - 0.5 * outside / outside.sum()

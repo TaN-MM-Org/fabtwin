@@ -117,6 +117,20 @@ def _merit_of(lam, t, n0, S, w, const, n_inc, n_sub, model=None):
     return float(tmm.merit(T, w, const))
 
 
+def _merits_of(lam, t, n0, S, w, const, n_inc, n_sub, model=None):
+    """`_merit_of` for R designs t, n0 (R, N) (new in 0.11.0): one
+    solver call for all of them on the linear path (equal to the
+    per-design loop to rounding, see `tmm._transmittance_batch`), the
+    loop with model=."""
+    R = len(t)
+    if model is not None:
+        return np.array([_merit_of(lam, t[r], n0[r], S, w, const, n_inc,
+                                   n_sub, model) for r in range(R)])
+    T = tmm._transmittance_batch(lam, t, n0, S, n_inc, n_sub)
+    wv = np.asarray(w)
+    return np.array([float(tmm.merit(T[r], wv, const)) for r in range(R)])
+
+
 def adam_ascent(lam, t, n0, S, w, const, box, n_iter=40, lr=4e-3,
                 n_inc=1.0, n_sub=1.0, beta1=0.9, beta2=0.999, eps=1e-8,
                 model=None):
@@ -157,9 +171,9 @@ def adam_ascent(lam, t, n0, S, w, const, box, n_iter=40, lr=4e-3,
     return best[0], best[1], best[2], np.asarray(traj)
 
 
-def inverse_design(lam, S, w, const, box, n_probe=200, n_seed=4,
-                   n_iter=40, lr=4e-3, n_inc=1.0, n_sub=1.0, seed=0,
-                   model=None):
+def inverse_design(lam, S, w, const, box: DesignBox, n_probe: int = 200,
+                   n_seed: int = 4, n_iter: int = 40, lr: float = 4e-3,
+                   n_inc=1.0, n_sub=1.0, seed=0, model=None) -> tuple:
     """Probe-seeded adjoint engine. Query budget = n_probe
     + 2 n_seed n_iter. Returns (t*, n*, J*, best-so-far trajectory).
     With model= (a `fabtwin.OpticalModel`) the merit, angles and
@@ -167,8 +181,7 @@ def inverse_design(lam, S, w, const, box, n_probe=200, n_seed=4,
     _check_model(w, model)
     rng = np.random.default_rng(seed)
     tp, npr = box.sample(rng, n_probe)
-    Jp = np.array([_merit_of(lam, tp[r], npr[r], S, w, const,
-                             n_inc, n_sub, model) for r in range(n_probe)])
+    Jp = _merits_of(lam, tp, npr, S, w, const, n_inc, n_sub, model)
     order = np.argsort(Jp)[::-1]
     traj = list(np.maximum.accumulate(Jp))
     best = (None, None, -np.inf)
@@ -183,13 +196,12 @@ def inverse_design(lam, S, w, const, box, n_probe=200, n_seed=4,
     return best[0], best[1], best[2], np.asarray(traj)
 
 
-def random_search(lam, S, w, const, box, budget, n_inc=1.0, n_sub=1.0,
-                  seed=1, model=None):
+def random_search(lam, S, w, const, box: DesignBox, budget: int,
+                  n_inc=1.0, n_sub=1.0, seed=1, model=None) -> tuple:
     """Equal-budget random-search baseline."""
     _check_model(w, model)
     rng = np.random.default_rng(seed)
     t, n0 = box.sample(rng, budget)
-    J = np.array([_merit_of(lam, t[r], n0[r], S, w, const, n_inc, n_sub,
-                            model) for r in range(budget)])
+    J = _merits_of(lam, t, n0, S, w, const, n_inc, n_sub, model)
     b = int(np.argmax(J))
     return t[b], n0[b], float(J[b]), np.maximum.accumulate(J)
