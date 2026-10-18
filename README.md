@@ -51,6 +51,10 @@ It answers questions such as:
 - The machine stops each layer with an optical monitor: at which
   monitor wavelength does every layer stop reliably, and how large is
   the thickness error that the monitor's noise causes?
+- Over a whole monitored run, where each layer is stopped on the stack
+  as actually deposited, so that the errors of one layer move the
+  stops of the next: how large and how correlated are the thickness
+  errors, and what do they do to the worst devices?
 
 The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
@@ -225,9 +229,11 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.10.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
-0.11 on Linux). Examples 1 to 20 print exactly what they printed with
-0.9.1; example 21 is new. Wavelength ranges, stacks, error sizes and noise levels are
+printed with fabtwin 0.11.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
+0.11 on Linux). Examples 1 to 10 and 12 to 21 print exactly what they
+printed with 0.10.1. Example 11 prints slightly different numbers,
+because a band edge on its wavelength grid now counts (see
+[Corrections](#corrections-in-earlier-versions)); example 22 is new. Wavelength ranges, stacks, error sizes and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
 literature references. All examples except example 8 need only the
@@ -712,9 +718,9 @@ print("meets the spec at both angles:", bool(ft.pass_fail(T, stop, pas, 0.10, 0.
 ```
 
 ```
-   0 deg: max T in stop band 0.042, mean T in pass bands 0.903
+   0 deg: max T in stop band 0.041, mean T in pass bands 0.903
   20 deg: max T in stop band 0.047, mean T in pass bands 0.910
-smooth margin J = 0.0446
+smooth margin J = 0.0447
 meets the spec at both angles: True
 ```
 
@@ -727,7 +733,11 @@ into one smooth number. It is built never to overstate the margin, so
 `LinearMerit` on `R`, `T` or `A`, and `FunctionMerit` (your own
 function and its derivatives) work the same way. Here a linear notch
 merit gives the starting point and the specification margin finishes
-the design.
+the design. (Up to 0.10.1, `notch_weights` left the grid point 0.545
+out of the stop band, because `0.5325 + 0.0125` is
+`0.5449999999999999` in binary floating point; the mask `stop` above
+includes it. Since 0.11.0 both agree, and the first line printed
+0.042 and `J = 0.0446` before.)
 
 ### 12. Robust design: an unbiased gradient, and an uncertain twin
 
@@ -1301,13 +1311,70 @@ part of its curve. The [monitoring tutorial](#tutorials) scans many
 monitor wavelengths for a designed filter and checks the predictions
 against simulated stops.
 
+### 22. The errors of a whole monitored run
+
+```python
+import numpy as np
+import fabtwin as ft
+
+t = np.array([0.075, 0.098, 0.066, 0.118])    # the recipe of example 21
+n = np.array([2.1, 1.46, 2.1, 1.46])
+e = ft.monitoring_errors(0.47, t, n, sigma_signal=0.001, n_sub=1.52)
+print("layer  alone (nm)  whole run (nm)")
+for j in e.order:
+    print(f"{j:5d} {1e3 * e.sigma_t_independent[j]:11.3f} {1e3 * e.sigma_t[j]:15.3f}")
+print("correlation of layers 0 and 1:", round(e.correlation[0, 1], 3))
+
+# the same runs without the linearization: 4000 simulated runs
+runs = ft.simulate_monitored_runs(0.47, t, n, sigma_signal=0.001,
+                                  n_runs=4000, seed=1, n_sub=1.52)
+print("simulated (nm):", np.round(1e3 * (runs - t).std(axis=0, ddof=1)[e.order], 3))
+
+# a twin of the monitored machine, for scoring designs
+twin = e.twin()
+print("twin relative sigma:", np.round(np.sqrt(np.diag(twin.cov))[:4], 4))
+```
+
+```
+layer  alone (nm)  whole run (nm)
+    3       3.541           3.541
+    2       0.320           0.724
+    1       0.249           0.603
+    0       0.080           0.234
+correlation of layers 0 and 1: -0.498
+simulated (nm): [3.605 0.729 0.61  0.235]
+twin relative sigma: [0.0031 0.0062 0.011  0.03  ]
+```
+
+`monitoring_plan` gives each layer's thickness error as if the layers
+below it were exact ("alone"). In a real run they are not. Layer 2 is
+stopped when the signal of the stack as deposited reaches its
+cut-off, so the 3.5 nm error of layer 3 moves the stop of layer 2, and
+so on up the stack. `monitoring_errors` (new in 0.11.0) carries the
+errors through the whole run, to first order: with `A[j, k]` the
+change of the signal at the stop of layer `j` per um of layer `k`,
+the errors are `dt = -A^-1 (e + offset)`, where `e` is the noise at
+each stop. Here the top layer's error is almost three times its error
+alone, and the errors of neighboring layers are correlated. With
+independent noise at every stop, a layer's whole-run error is never
+smaller than its error alone. `simulate_monitored_runs` simulates the
+same runs layer by layer without the linearization (root finding on
+the forward optics). Its scatter agrees with the prediction here
+within 2 %, and the tests hold the two together. `signal_offset=`
+adds a constant error of the monitor (a calibration offset), and
+`.twin()` gives a `GaussianTwin` of the monitored machine for
+`evaluate_under_process` or `robustify`. As for `monitoring_plan`, a
+run in which a layer ends too close to a turning point for the errors
+it receives is refused: at 0.52 um, the wavelength of example 21,
+layer 2 is.
+
 ## Tutorials
 
 The `examples/` directory has complete scripts that go from data to a
 result with its uncertainty. Each uses only the package, generates its
 "measured" data with fixed seeds, runs in under 30 seconds, and prints
-what is shown below (also at the top of each script). A test runs both
-and checks the printed numbers.
+what is shown below (also at the top of each script). A test runs each
+one and checks the printed numbers.
 
 **`examples/tutorial_monitoring.py`: choose the monitor wavelength.**
 It designs the 8-layer notch filter of example 3, plans level
@@ -1374,6 +1441,60 @@ deviation). The pooled bias, 0.0201 +/- 0.0033, matches the hidden
 twin's scatter also contains the measurement noise, which here is
 small.
 
+**`examples/tutorial_monitored_run.py`: the errors of a whole
+monitored run** (new in 0.11.0). The first tutorial judges each layer
+on its own, as if the layers below it were exact. This one carries
+the errors through the whole run with `monitoring_errors`, for the
+same filter and noise, at every monitor wavelength from 0.40 to
+0.80 um. It checks the result at the best wavelength against 2000 runs
+simulated layer by layer with `simulate_monitored_runs`. It then picks
+the wavelength that is best for the filter itself (the worst 10 % of
+its merit) from the twin of each wavelength, and checks that choice
+with simulated runs, the same noise at both wavelengths. Last, it
+shows what a 0.2 % calibration offset of the monitor does. It runs in
+about 10 seconds.
+
+```
+design merit 0.7704
+usable wavelengths: 14 layer by layer, 11 for the whole run
+best layer by layer: 0.470 um, worst relative error 0.0054 alone, 0.0123 in the whole run
+best for the whole run: 0.490 um, worst relative error 0.0066 alone, 0.0101 in the whole run
+at 0.490 um, sigma_t in nm:
+layer  alone  whole run  simulated runs
+    7  0.388      0.388   0.391 +/- 0.006
+    6  0.450      0.676   0.655 +/- 0.010
+    5  0.139      0.410   0.393 +/- 0.006
+    4  0.138      0.239   0.237 +/- 0.004
+    3  0.139      0.225   0.222 +/- 0.004
+    2  0.181      0.294   0.293 +/- 0.005
+    1  0.139      0.310   0.313 +/- 0.005
+    0  0.086      0.174   0.174 +/- 0.003
+correlation of layers 1 and 2: predicted -0.815, simulated -0.815
+best for the filter (CVaR of the twin): 0.470 um
+CVaR(10 %) at 0.470 um: simulated runs 0.770221 +/- 0.000003, twin 0.770208 +/- 0.000004
+CVaR(10 %) at 0.490 um: simulated runs 0.770165 +/- 0.000005, twin 0.770152 +/- 0.000005
+simulated runs, 0.470 um minus 0.490 um: 0.000056, 95 % interval 0.000048 to 0.000064
+offset +0.2 %: thickness shifts (nm), layers in deposition order
+  predicted: [-0.78  0.11  0.65 -0.28  0.26 -0.24  0.26 -0.14]
+  simulated: [-0.83  0.13  0.67 -0.28  0.26 -0.24  0.26 -0.14]
+```
+
+In the whole run the worst error is more than twice as large as layer
+by layer (0.0123 instead of 0.0054 at 0.470 um), and another
+wavelength, 0.490 um, has the smallest worst-layer error. The
+simulated runs agree with the prediction within 5 % for every layer
+(layers 5 and 6 differ by more than their standard errors, by about
+4 % and 3 %: the prediction is first order, and the simulation is
+not). The correlation of layers 1 and 2 agrees to the third decimal. Yet for this filter the
+best wavelength by the merit is still 0.470 um: the twin says so, and
+the simulated runs confirm it with a paired interval that excludes
+zero. The difference is tiny, because the merit of this design hardly
+changes with errors below a nanometer. The twin's CVaR is about
+1e-5 below that of the simulated runs at both wavelengths: the twin
+is first order, and it also slightly overstates the scatter of layers
+5 and 6. A calibration offset shifts every
+layer in a fixed pattern, predicted to about 0.05 nm.
+
 ## What is in the package
 
 Every name below is exported from `fabtwin` unless marked
@@ -1404,7 +1525,9 @@ example) gives the inputs, units and conventions.
   of the whole plate, back face included (example 17).
 - `notch_weights`, `bandpass_weights` -- the two filter merits of the
   paper as weights `(w, const)`; `merit(T, w, const)` evaluates
-  `w . T + const`.
+  `w . T + const`. Since 0.11.0 a wavelength exactly on a band edge
+  belongs to the band, also when round-off puts the computed edge just
+  past it.
 - `weights_from_reflectance(w_R, const)` -- turns a merit written in
   terms of `R` (for a mirror) into one in terms of `T`, using
   `R = 1 - T`, which holds only for non-absorbing stacks.
@@ -1559,6 +1682,20 @@ example) gives the inputs, units and conventions.
   `sigma_t`, `rel_sigma_t`, `nonlinearity`, `curves`; method
   `worst_rel_sigma_t()`): the level-monitoring plan of a recipe at one
   monitor wavelength (example 21 and the monitoring tutorial).
+- New in 0.11.0: `monitoring_errors(lam_mon_um, recipe_t_um, n_layers,
+  sigma_signal, n_inc=1.0, n_sub=1.52, quantity="T", theta0_rad=0.0,
+  pol="s", n_exit=None, signal_offset=0.0, max_nonlinearity=0.1)` ->
+  `MonitoringErrors` (fields `sensitivity`, `propagation`, `mean_t`,
+  `covariance`, `sigma_t`, `correlation`, `rel_mean_t`,
+  `rel_sigma_t`, `rel_covariance`, `sigma_t_independent`,
+  `nonlinearity`, `order`; method `twin()`): the thickness errors of a
+  whole level-monitored run to first order, each layer's errors
+  carried into the stops of the layers after it.
+  `simulate_monitored_runs(lam_mon_um, recipe_t_um, n_layers,
+  sigma_signal=None, n_runs=None, seed=0, noise=None, ...,
+  signal_offset=0.0)` -> `(n_runs, N)` deposited thicknesses: the same
+  runs simulated layer by layer, without the linearization (example 22
+  and the tutorial on a whole monitored run).
 
 **Planning** (`fabtwin.lab`)
 
@@ -1683,11 +1820,20 @@ example) gives the inputs, units and conventions.
   `"T"` or `"R"`, a `sigma_signal` that is not positive, or fewer than
   8 points per quarter wave. It returns NaN for `sigma_t`, with a
   warning, for a layer that ends too close to a turning point of the
-  monitor signal (the first-order error would not be trustworthy).
+  monitor signal (the first-order error would not be trustworthy);
+- new in 0.11.0: `monitoring_errors` refuses the same inputs as
+  `monitoring_plan`, a missing or non-positive `sigma_signal`, a
+  non-finite `signal_offset`, and a run in which some layer ends too
+  close to a turning point for the errors it receives (the message
+  names the layers); `simulate_monitored_runs` refuses a `noise` array
+  that is not `(n_runs, N)` and finite, `noise` together with
+  `sigma_signal` or `n_runs`, and a missing or non-whole `n_runs`. A
+  simulated stop that the signal cannot reach on its branch of the
+  monitoring curve is NaN, with a warning, not a number.
 
 ## How the results are checked
 
-180 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+197 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
@@ -2010,6 +2156,50 @@ statistical tolerances. The main checks:
   scatter against prediction within 4 standard errors, and the
   recovered bias within 3 standard errors of the hidden one.
 
+**Whole monitored runs, band edges, ties and speed (0.11.0)**
+
+- `simulate_monitored_runs`: for one layer on a substrate, the stop
+  for a given signal error equals the closed form above solved for the
+  thickness by hand (`sin^2 d = (4 n0 ns / T - (n0 + ns)^2) /
+  ((n0 ns / n1 + n1)^2 - (n0 + ns)^2)`, on the branch of the recipe;
+  1e-13 um); for four layers, every simulated run equals an independent
+  simulation with SciPy's `brentq` on `stack_rt`, layer by layer
+  (1e-12 um), with and without an offset; with no noise every layer
+  ends at its recipe thickness (1e-14 um).
+- `monitoring_errors`: for one layer, the sensitivity equals the
+  derivative of the closed form (relative 1e-12); the propagation
+  matrix equals central finite differences of the simulated run with
+  respect to the noise at each stop (relative 1e-6), and the matrix of
+  sensitivities is upper triangular; the per-layer errors equal those
+  of `monitoring_plan` (1e-12); an offset of 1e-5 moves the simulated
+  layers as predicted (relative 1e-3, the size of the second-order
+  term); over 2000 simulated runs the standard deviations agree with
+  the prediction within 6 % and the correlations within 0.08 (about 4
+  standard errors each); and the twin has exactly the predicted
+  covariance, with zero index errors.
+- Band edges: on 5 nm grids, the stop and pass bands of `notch_weights`
+  and `bandpass_weights` equal the bands counted on the integer grid
+  index, edges included; on 200 random grids with no point near an
+  edge, the weights equal the 0.10.1 formula exactly.
+- `drift_test`: for two groups far apart, where only the observed split
+  (and its swap) reaches the observed statistic (all other splits are
+  enumerated and are at least 10 % smaller), the p-value equals
+  `(1 + number of permutations giving those splits) / (1 + n_perm)`,
+  counted from the index sets alone, with no floating point; under the
+  null with 3 + 3 runs, 60 seeded data sets never give a p-value below
+  0.06 (the exact minimum is 0.1).
+- The batched forward solver equals one `transmittance` call per
+  design on 30 random cases (1 to 20 layers, shared and per-layer
+  dispersion, absorbing layers, several chunks per call), and
+  `evaluate_under_process`, `induced_merits`, `random_search` and
+  `inverse_design` equal their 0.10.1 per-design loops, kept in the
+  tests, all to 1e-12 of the largest value.
+- The third tutorial prints what is shown above and passes its own
+  checks: no layer's whole-run error below its error alone, simulated
+  scatter within 4 standard errors plus 5 % of the prediction, the
+  twin's CVaR within 3e-5 of the simulated runs', and a paired
+  interval that excludes zero.
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -2018,6 +2208,39 @@ generator matches finite differences to a relative 1e-5;
 works, not how good a trained twin is.
 
 ## Corrections in earlier versions
+
+**0.11.0 fixed two wrong answers.**
+
+- *A band edge on the wavelength grid.* `notch_weights` and
+  `bandpass_weights` compute the band edges, such as `c + h`, in
+  binary floating point, and an edge can land just inside a grid
+  point that lies exactly on it in decimal. Up to 0.10.1 such a point
+  was dropped from the band. `0.5325 + 0.0125` is `0.5449999999999999`,
+  so on a 5 nm grid from 0.45 um the stop band [0.52, 0.545] of README
+  example 11 had 5 points instead of 6 (0.545 was missing, while the
+  example's own mask included it), and `notch_weights(lam, 0.55, 0.02,
+  0.01)` on a 5 nm grid from 0.40 um left 0.58 out of the upper pass
+  band but kept 0.52 in the lower one. A point within `1e-9` of the
+  largest wavelength of an edge now counts as on it. Only grids with a
+  point on an edge change; example 11 now prints 0.041 for the largest
+  stop-band `T` at 0 degrees (0.042 before) and `J = 0.0447` (0.0446).
+  No other README example or tutorial changes.
+- *Too small a p-value from `drift_test` with few runs.* A permutation
+  that gives the observed split of the runs again (or swaps the two
+  groups when they have equal sizes) has exactly the observed
+  statistic, and the permutation p-value must count it. Recomputed
+  from reordered rows, the statistic can come out a few units of the
+  last digit smaller, and 0.10.1 then did not count it. With few runs
+  this matters: for 2 + 2 well-separated runs (data seed 1 in the
+  tests) `drift_test` gave `p = 0.036`, although with 4 runs no
+  p-value below 1/3 is possible, and it now gives 0.315; for 3 + 3
+  runs, 0.082 instead of 0.103; under the null hypothesis with 3 + 3
+  runs, one of 60 seeded data sets gave 0.046, below the exact
+  minimum of 0.1. A permuted statistic less than `1e-9` times the
+  mean distance between the runs below the observed one now counts as
+  a tie. With tens of runs per
+  group a repeated split is very unlikely, and README example 13 prints
+  the same as before.
 
 **0.10.0 fixed two wrong answers at extreme but valid inputs.**
 
@@ -2121,6 +2344,32 @@ tolerance; the list above gives the tolerances the tests actually
 use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
+
+What 0.11.0 adds, and its limits:
+
+- **Whole monitored runs.** `monitoring_errors` is first order in the
+  signal errors. It assumes cut-offs fixed from the recipe before the
+  run (not recomputed during it), independent noise at every stop,
+  and nothing else changing during the run (deposition rate, index,
+  monitor drift). It refuses a run in which a layer ends too close to
+  a turning point for the errors it receives; its check uses the
+  curvature of that layer's own monitoring curve, not the second
+  derivatives with respect to the layers below. In the tutorial its
+  standard deviations are within 5 % of simulated runs.
+  `simulate_monitored_runs` stops each layer on the branch of its
+  curve that contains the recipe thickness; a controller that counts
+  turning points differently, or stops at a turning point, is not
+  modeled, and such stops come back as NaN. The twin of
+  `MonitoringErrors.twin()` belongs to one recipe and has no index
+  errors; combine it with an index model of your own if the indices
+  vary.
+- **Band edges.** A wavelength within `1e-9` of the largest wavelength
+  of a band edge counts as on the edge; a grid finer than that is not
+  meaningful.
+- **Speed.** The linear-merit scoring loops now evaluate all designs
+  in one call (`evaluate_under_process`, `induced_merits`,
+  `random_search`, the probes of `inverse_design`); with `model=` they
+  still evaluate one design at a time.
 
 What 0.10.0 adds, and its limits:
 

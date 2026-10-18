@@ -1,0 +1,4 @@
+# The source distribution also carries the worked tutorials (the
+# tutorial tests run them), the changelog and the citation file.
+graft examples
+include CHANGELOG.md CITATION.cff CONTRIBUTING.md

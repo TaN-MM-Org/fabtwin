@@ -1,5 +1,131 @@
 # Changelog
 
+## 0.11.0 (2026-10-18)
+
+The thickness errors of a whole monitored run, two fixes, faster
+scoring, a third tutorial, and the tutorials in the source
+distribution.
+
+### Added
+
+- `monitoring_errors(lam_mon_um, recipe_t_um, n_layers, sigma_signal,
+  n_inc=1.0, n_sub=1.52, quantity="T", theta0_rad=0.0, pol="s",
+  n_exit=None, signal_offset=0.0, max_nonlinearity=0.1)` ->
+  `MonitoringErrors` (`fabtwin.monitor`): the thickness errors of a
+  whole level-monitored run, with the errors of each layer carried
+  into the stops of the layers after it (`monitoring_plan` treats each
+  layer as if the layers below it were exact). To first order, with
+  `A[j, k] = d S_j / d t_k` (the exact derivatives of
+  `fabtwin.gradients`), `dt = G (e + offset)` with `G = -A^-1`, so
+  `cov(dt) = sigma_signal^2 G G^T` and `mean(dt) = offset G 1`.
+  Fields: the sensitivity and propagation matrices, mean, covariance,
+  standard deviations and correlations (absolute and relative), the
+  per-layer errors of `monitoring_plan` for comparison, and a
+  nonlinearity measure; `.twin()` gives a `GaussianTwin` of the
+  monitored machine (relative thickness errors, zero index errors).
+  Refused: the inputs `monitoring_plan` refuses, a non-positive
+  `sigma_signal`, a non-finite offset, and a run in which a layer ends
+  too close to a turning point for the errors it receives
+  (`nonlinearity` above `max_nonlinearity`, the layers named).
+- `simulate_monitored_runs(lam_mon_um, recipe_t_um, n_layers,
+  sigma_signal=None, n_runs=None, seed=0, noise=None, ...,
+  signal_offset=0.0)`: the same runs simulated layer by layer without
+  any linearization; each stop is found by bisection on `stack_rt` on
+  the branch of the layer's monitoring curve that contains the recipe
+  thickness, all runs at once. A stop the signal cannot reach on that
+  branch is NaN, with a RuntimeWarning.
+- README example 22 (the errors of a whole monitored run).
+- `MANIFEST.in`: the source distribution now contains `examples/`
+  (and `CHANGELOG.md`, `CITATION.cff`, `CONTRIBUTING.md`), so the
+  tutorial tests run from an unpacked sdist instead of being skipped.
+
+### Fixed
+
+- Band edges on the wavelength grid. `notch_weights` and
+  `bandpass_weights` dropped a grid point that lies exactly on a band
+  edge (in decimal) when binary round-off put the computed edge just
+  past it. Before -> after: `notch_weights` on
+  `np.linspace(0.45, 0.70, 51)` with center 0.5325, half-width 0.0125,
+  guard 0.02 (README example 11): 5 -> 6 stop-band points (0.545 was
+  missing, because `0.5325 + 0.0125` is `0.5449999999999999`); on
+  `np.linspace(0.40, 0.70, 61)` with 0.55, 0.02, 0.01: the upper pass
+  band started at 0.585 -> 0.58, while the lower one already ended at
+  0.52. A point within `1e-9` of the largest wavelength of an edge now
+  counts as on it. Effect on README example 11: largest stop-band `T`
+  at 0 degrees 0.042 -> 0.041, smooth margin `J` 0.0446 -> 0.0447. No
+  other README example or tutorial changes; where no grid point lies
+  within 1e-6 um of an edge the weights are unchanged exactly (200
+  random grids). Tests:
+  `test_v011.py::test_band_edges_on_the_grid_belong_to_their_band`,
+  `test_band_edges_off_the_grid_are_unchanged`.
+- `drift_test` p-values too small with few runs. A permutation that
+  reproduces the observed split (or swaps two groups of equal size)
+  has the observed statistic exactly, but recomputed from reordered
+  rows it can come out a few units of the last digit smaller, and was
+  then not counted. Before -> after (`n_perm=999`, `seed=0`, two
+  groups 6 standard deviations apart, data seeds of the tests): 2 + 2
+  runs, data seed 1: 0.036 -> 0.315 (with 4 runs no p-value below 1/3
+  is possible); data seed 10: 0.065 -> 0.315; 3 + 3 runs, data seed 0:
+  0.082 -> 0.103; 2 + 3 runs, data seed 6: 0.052 -> 0.106; under the
+  null with 3 + 3 runs, the smallest of 60 seeded p-values 0.046 ->
+  0.087 (the exact minimum is 0.1). A permuted statistic less than
+  `1e-9` times the mean distance between the runs below the observed
+  one now counts as a tie. README example 13 is unchanged. Tests:
+  `test_v011.py::test_drift_test_counts_ties_in_small_groups` (5
+  cases; the reference counts the permutations by their index sets,
+  without floating point) and
+  `test_drift_test_small_groups_never_go_below_the_exact_minimum`.
+
+### Performance
+
+- `evaluate_under_process`, `induced_merits` (and so
+  `twin_fidelity_report`), `random_search` and the probes of
+  `inverse_design`, without `model=`: all designs go through one call
+  of the forward solver, side by side along its column axis (in
+  chunks), instead of one call per design. Every column goes through
+  the same element-wise operations as before; the tests compare with
+  the 0.10.1 loops, kept as references, to 1e-12 of the largest value
+  (not bit for bit: vectorized math kernels may round the last digit
+  differently on other processors). Measured on one shared 2-CPU
+  machine (NumPy 2.5, CPU time, median of 15 interleaved runs, two
+  sessions), 41 wavelengths: `evaluate_under_process` with 500 draws
+  of the reference process 2.8x (8 layers) and 2.2x (20 layers),
+  sampling included; `induced_merits` with 500 error vectors 3.5x to
+  4.0x (8 layers) and 2.4x to 2.7x (20 layers); 200 probes 3.1x to
+  3.6x (8 layers) and 2.5x to 2.7x (20 layers).
+
+### Tutorials
+
+- `examples/tutorial_monitored_run.py`: carries the errors through
+  whole monitored runs at every monitor wavelength from 0.40 to
+  0.80 um, checks them at the best wavelength against 2000 simulated
+  runs, picks the wavelength that is best for the filter's worst 10 %
+  from the twin of each wavelength and confirms it with simulated runs
+  (paired), and shows the effect of a 0.2 % calibration offset of the
+  monitor. About 10 s. Its printed output is in the README and at the
+  top of the script; `tests/test_tutorials.py` runs it and checks the
+  printed numbers.
+
+### Changed
+
+- `fabtwin.tmm` accepts, internally only, one thickness per layer and
+  wavelength column (used by the batched scoring and by
+  `simulate_monitored_runs`); the public calls are unchanged.
+- README: example 11's output and a note, example 22, the third
+  tutorial, the new functions, refusals, checks, corrections and
+  limits.
+
+### Tests
+
+197 tests (180 in 0.10.1): new file `test_v011.py` (16) and one more
+tutorial test. Independent references: integer grid arithmetic for
+the band edges; the index sets of the permutations of the drift test;
+the 0.10.1 per-design loops; the closed form of one layer on a
+substrate, inverted by hand; SciPy's `brentq` on `stack_rt` for
+simulated runs; central finite differences of the simulated run; and
+the scatter of 2000 simulated runs. The new tests add about 17 s,
+about 9 s of it the new tutorial.
+
 ## 0.10.1 (2026-10-18)
 
 A test and documentation fix. No result of the package changes.
