@@ -191,7 +191,24 @@ def _draws_reference(lam, t, n0, S, w, const, twin, z, box, n_inc, n_sub):
     return J, gT, gN
 
 
-def test_batched_draws_equal_the_per_draw_loop_bit_for_bit():
+def _equal_to_rounding(a, b, rel=1e-12):
+    """a equals b up to rel times the largest |b|.
+
+    0.10.0 asked for bit-for-bit equality here. That held on the
+    development machine, but it failed once on a GitHub test machine
+    (oldest-dependencies job, NumPy 1.26.0) and passed for the same code
+    in two later runs: the last digits of the batched arithmetic can
+    differ between machines. 1e-12 is about 4500 times the double
+    precision step and far below any change a code error would cause.
+    """
+    a = np.asarray(a)
+    b = np.asarray(b)
+    assert a.shape == b.shape
+    scale = float(np.max(np.abs(b))) if b.size else 0.0
+    assert float(np.max(np.abs(a - b), initial=0.0)) <= rel * scale
+
+
+def test_batched_draws_equal_the_per_draw_loop():
     rng = np.random.default_rng(1)
     for case in range(25):
         N = int(rng.integers(1, 16))
@@ -211,7 +228,7 @@ def test_batched_draws_equal_the_per_draw_loop_bit_for_bit():
         ref = _draws_reference(lam, t, n0, S, w, 0.3, twin, z, box, 1.0,
                                nsub)
         for a, b in zip(new, ref):
-            assert np.array_equal(a, b)
+            _equal_to_rounding(a, b)
 
 
 def test_batched_adjoint_rows_equal_merit_and_grad():
@@ -226,8 +243,9 @@ def test_batched_adjoint_rows_equal_merit_and_grad():
     for k in range(7):
         Jk, gdk, gnk = ft.merit_and_grad(lam, t[k], n[k], S, w, c,
                                          n_sub=1.46)
-        assert J[k] == Jk and np.array_equal(gd[k], gdk) and \
-            np.array_equal(gn[k], gnk)
+        _equal_to_rounding(J[k], Jk)
+        _equal_to_rounding(gd[k], gdk)
+        _equal_to_rounding(gn[k], gnk)
     with pytest.raises(ValueError, match="lossless"):
         adjoint._merits_and_grads_batch(lam, t, n, S, w, c, n_sub=1.46 + 0j)
 
