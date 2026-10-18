@@ -6,8 +6,8 @@ authors:
   - family-names: "Mahim"
     given-names: "Tanvir Mahmud"
     affiliation: "BRAC University"
-version: 0.10.0
-date-released: 2026-10-17
+version: 0.10.1
+date-released: 2026-10-18
 license: Apache-2.0
 repository-code: "https://github.com/TaN-MM-Org/fabtwin"
 identifiers:

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.10.1 (2026-10-18)
+
+A test and documentation fix. No result of the package changes.
+
+### Fixed
+
+- Two speed tests of 0.10.0 asked the batched computation to equal the
+  per-draw loop bit for bit: the draws of `robustify`,
+  `cvar_objective_and_grad` and `ru_objective_and_grad` (without
+  `model=`), and the batched hand adjoint. This holds on the
+  development machine. On GitHub's test machines it failed once, in
+  the oldest-dependencies job (Python 3.10, NumPy 1.26.0), and the same
+  code passed in two later runs there. So the last digits can differ
+  between machines. The tests now allow a difference of 1e-12 of the
+  largest value (`test_batched_draws_equal_the_per_draw_loop`, formerly
+  `..._bit_for_bit`, and `test_batched_adjoint_rows_equal_merit_and_grad`).
+- The README, the `fabtwin.adjoint` docstring and a comment in
+  `fabtwin.robust` said "bit for bit" for this path. They now say
+  "equal to rounding" and explain why. The 0.10.0 entry below is left
+  as released; its "equal bit for bit" holds on the development
+  machine only.
+
 ## 0.10.0 (2026-10-17)
 
 Planning the optical monitoring of a run, two fixes at extreme inputs,

@@ -1997,9 +1997,12 @@ statistical tolerances. The main checks:
   results are the 0.9.1 ones, bit for bit; just above it they agree
   with the 0.9.1 arithmetic to 1e-13 (`R`) and 1e-11 (`T`).
 - `robustify`, `cvar_objective_and_grad` and `ru_objective_and_grad`
-  (without `model=`) return the same numbers as 0.9.1, bit for bit:
+  (without `model=`) return the same numbers as 0.9.1 up to rounding:
   the tests compare the batched draws with the 0.9.1 per-draw loop on
-  25 random cases with `np.array_equal`.
+  25 random cases, to 1e-12 of the largest value. On the development
+  machine they agree bit for bit. On one GitHub test machine the last
+  digits differed once, so 0.10.1 no longer asks for bit-for-bit
+  equality.
 - The conformal rank is never 0, against exact rational arithmetic for
   `alpha = 1 - 10^-k`, `k = 1 ... 15`.
 - Both tutorials print what is shown above (to the last printed
