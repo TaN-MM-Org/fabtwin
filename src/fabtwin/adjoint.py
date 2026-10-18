@@ -124,11 +124,13 @@ def _merits_and_grads_batch(lam_um, t_um, n0, shape, weights, const,
     """`merit_and_grad` for K designs at once (new in 0.10.0; internal).
 
     t_um, n0 : (K, N). Returns J (K,), dJ_dt (K, N), dJ_dn0 (K, N),
-    equal bit for bit to K separate `merit_and_grad` calls (the same
+    equal to K separate `merit_and_grad` calls up to rounding (the same
     arithmetic, element by element, with a leading batch axis; the
     final sums over wavelength are taken one design at a time on
-    contiguous arrays, as in `merit_and_grad`). The tests compare the
-    two on random batches with `np.array_equal`.
+    contiguous arrays, as in `merit_and_grad`). On the development
+    machine they agree bit for bit; on one GitHub test machine they did
+    not, so the tests compare the two on random batches to 1e-12 of the
+    largest value (since 0.10.1).
     """
     if any(np.iscomplexobj(np.asarray(a))
            for a in (t_um, n0, shape, n_sub, n_inc)):

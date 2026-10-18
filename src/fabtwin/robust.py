@@ -145,8 +145,9 @@ def _draws(lam, t, n0, S, w, const, twin, z, box, n_inc, n_sub, model):
     t_lo, t_hi, n_lo, n_hi = _fab_clip_bounds(box)
     if model is None:
         # all K draws through the adjoint at once (new in 0.10.0): the
-        # same numbers, bit for bit, as the per-draw loop below, which
-        # the tests keep as the reference
+        # same arithmetic as the per-draw loop below, which the tests
+        # keep as the reference (equal to rounding; bit for bit on the
+        # development machine, not on every machine, see 0.10.1)
         tk_raw = t[None, :] * (1.0 + x[:, :N])
         nk_raw = n0[None, :] + x[:, N:]
         tk = np.clip(tk_raw, t_lo, t_hi)
