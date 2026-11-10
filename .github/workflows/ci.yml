@@ -2,7 +2,7 @@ name: tests
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +17,7 @@ jobs:
   oldest-dependencies:
     # the lowest versions pyproject.toml allows, core and [twin] extra
     # (scipy 1.11.0 is yanked on PyPI but installs with an exact pin)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
