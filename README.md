@@ -40,7 +40,8 @@ It answers questions such as:
 - Halfway through a run, how should the remaining layers change to
   make up for the errors already made?
 - A spectrophotometer measured a coated glass plate, back face and
-  all: what does the coating alone say about the layer errors?
+  all, perhaps of a glass that absorbs a little: what does the coating
+  alone say about the layer errors?
 - How sure is a yield or a worst-10 % merit computed from a few
   hundred simulated devices, and is one design really better than
   another?
@@ -122,7 +123,9 @@ looks fine but is not.
   thicker than the distance over which the measuring light stays in
   step with itself (its coherence length), so these bounces add up as
   powers rather than as waves (**incoherently**). `n_exit` switches
-  this on (new in 0.8.0).
+  this on (new in 0.8.0). A plate that absorbs a little loses part of
+  the light on every pass; `sub_thickness_um` gives its thickness so
+  that this loss can be included (new in 0.12.0).
 - **Transfer-matrix method (TMM)** -- the standard exact calculation
   of `R` and `T` for a layer stack: one 2x2 matrix per layer,
   multiplied together (Macleod, *Thin-Film Optical Filters*).
@@ -229,11 +232,10 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.11.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
-0.11 on Linux). Examples 1 to 10 and 12 to 21 print exactly what they
-printed with 0.10.1. Example 11 prints slightly different numbers,
-because a band edge on its wavelength grid now counts (see
-[Corrections](#corrections-in-earlier-versions)); example 22 is new. Wavelength ranges, stacks, error sizes and noise levels are
+printed with fabtwin 0.12.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
+0.12 on Linux). Examples 1 to 22 print exactly what they printed with
+0.11.0; example 23 is new. Wavelength ranges, stacks, error sizes,
+absorption and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
 literature references. All examples except example 8 need only the
@@ -1033,8 +1035,9 @@ determined by this one spectrum, as their `+/-` says). `n_exit` works
 the same way in `stack_rt`, `transmittance`, `reflectance`,
 `stack_rta_and_grads` (with exact derivatives),
 `errors_from_spectra` and `OpticalModel`, so designs, robust designs
-and scores can be made for the whole plate too. The incidence medium,
-substrate and exit medium must be non-absorbing.
+and scores can be made for the whole plate too. The incidence and
+exit media must be non-absorbing; a substrate that absorbs needs its
+thickness (example 23).
 
 The recovery functions also flag an error that sits on the edge of
 the search box (`at_bound`, with a warning): such a value was stopped
@@ -1361,12 +1364,85 @@ smaller than its error alone. `simulate_monitored_runs` simulates the
 same runs layer by layer without the linearization (root finding on
 the forward optics). Its scatter agrees with the prediction here
 within 2 %, and the tests hold the two together. `signal_offset=`
-adds a constant error of the monitor (a calibration offset), and
+adds a constant error of the monitor (a calibration offset), or,
+since 0.12.0, one value per stop (an array indexed like the recipe)
+for a monitor whose calibration drifts during the run; the thickness
+errors it causes are then `G o`, with `o` the offsets at the stops.
 `.twin()` gives a `GaussianTwin` of the monitored machine for
 `evaluate_under_process` or `robustify`. As for `monitoring_plan`, a
 run in which a layer ends too close to a turning point for the errors
 it receives is refused: at 0.52 um, the wavelength of example 21,
 layer 2 is.
+
+### 23. A plate of a glass that absorbs a little
+
+```python
+import warnings
+import numpy as np
+import fabtwin as ft
+
+lam = np.linspace(0.40, 0.80, 121)
+S = ft.dispersion_shape(lam, 0.550)
+t0 = np.array([0.070, 0.095, 0.060, 0.110, 0.080])    # the recipe of example 17
+n0 = np.array([2.2, 1.5, 2.2, 1.5, 2.2])
+xt = np.array([0.03, -0.02, 0.015, 0.01, -0.025])     # what the tool did (unknown)
+
+# A 1 mm plate of a glass that absorbs a little: the fused-silica index
+# with k = 1e-6 added (an illustrative value, not a measured glass).
+nsub = ft.SIO2_MALITSON1965.n(lam) + 1e-6j
+plate = dict(n_exit=1.0, sub_thickness_um=1000.0)
+
+bare = ft.transmittance(lam, [], np.zeros((0, lam.size)), 1.0, nsub, **plate)
+n, k = nsub[60].real, nsub[60].imag
+print(f"bare plate at {lam[60]:.2f} um: T = {bare[60]:.4f}, without the "
+      f"absorption {2 * n / (n ** 2 + 1):.4f}; one pass through 1 mm keeps "
+      f"{np.exp(-4 * np.pi * k * 1000.0 / lam[60]):.4f}")
+T = ft.transmittance(lam, t0 * (1 + xt), n0[:, None] * S, 1.0, nsub, **plate)
+T_meas = np.clip(T + np.random.default_rng(7).normal(0, 2e-3, lam.size), 0, 1)
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    rec = ft.errors_from_spectrum(lam, T_meas, t0, n0, S, n_sub=nsub.real,
+                                  sigma_T=2e-3, n_exit=1.0)
+print("absorption ignored: ", np.round(rec.dt_over_t, 4), f"chi2 p = {rec.chi2_pvalue:.0e}")
+print("  warning:", str(caught[0].message).split(":")[0])
+rec = ft.errors_from_spectrum(lam, T_meas, t0, n0, S, n_sub=nsub,
+                              sigma_T=2e-3, **plate)
+print("absorption included:", np.round(rec.dt_over_t, 4), f"chi2 p = {rec.chi2_pvalue:.2f}")
+print("  +/-               ", np.round(rec.sigma, 4))
+print("true:               ", xt)
+```
+
+```
+bare plate at 0.60 um: T = 0.9135, without the absorption 0.9329; one pass through 1 mm keeps 0.9793
+absorption ignored:  [-0.061   0.0213  0.1084 -0.0712  0.0189] chi2 p = 1e-43
+  warning: chi2 = 466.7 for 116 degrees of freedom (p = 1.39e-43)
+absorption included: [ 0.0375 -0.0436  0.0423 -0.0021 -0.0193] chi2 p = 0.99
+  +/-                [0.0092 0.0242 0.0264 0.0107 0.0037]
+true:                [ 0.03  -0.02   0.015  0.01  -0.025]
+```
+
+Example 17 assumed a plate that absorbs nothing. Some glasses absorb a
+little, and then the loss depends on how thick the plate is, which is
+why up to 0.11.0 an absorbing substrate was refused with `n_exit`.
+`sub_thickness_um` (new in 0.12.0) gives that thickness, in um. Each
+pass through the plate then keeps the fraction
+`exp(-4 pi d Im(n cos theta) / lam)` of the light, about 98 % here,
+and the bounces between the coating and the back face are summed with
+that loss. Fitting the spectrum as if the glass did not absorb asks
+the layers to explain a 2 % loss: the answer is wrong (layer 3 comes
+out at +0.108 instead of +0.015), and the chi-square check flags it.
+With the absorption included, the fit is consistent with the noise and
+every error lies within 1.6 of its error bars of the truth. The value
+of `k` has to come from your own glass (for example from the
+transmittance of an uncoated plate of known thickness); the package
+has no built-in data for absorbing glasses. The tests compare such
+plates with the independent `tmm` package and with the closed form of
+a bare absorbing plate. `sub_thickness_um` works the same way in
+`stack_rt`, `reflectance`, `stack_rta_and_grads` (with exact
+derivatives), `errors_from_spectra`, `recovery_precision` and
+`OpticalModel`. `A = 1 - R - T` then includes the light the plate
+absorbs.
 
 ## Tutorials
 
@@ -1522,7 +1598,11 @@ example) gives the inputs, units and conventions.
   `R` and `T` for any stack, normal or oblique incidence, s or p
   polarization, absorbing layers allowed. New in 0.8.0: `n_exit=`
   (the index behind a thick, non-absorbing substrate) gives `R` and `T`
-  of the whole plate, back face included (example 17).
+  of the whole plate, back face included (example 17). New in 0.12.0:
+  with `n_exit`, `sub_thickness_um=` (the plate's thickness in um)
+  lets the substrate absorb (example 23). An absorbing incidence medium
+  is allowed at normal incidence only; `T` is then the transmitted
+  power divided by the power of the incident wave.
 - `notch_weights`, `bandpass_weights` -- the two filter merits of the
   paper as weights `(w, const)`; `merit(T, w, const)` evaluates
   `w . T + const`. Since 0.11.0 a wavelength exactly on a band edge
@@ -1547,16 +1627,18 @@ example) gives the inputs, units and conventions.
 - `stack_rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad,
   pol)` -- `R`, `T`, `A` and their derivatives with respect to every
   thickness, index real part and extinction `k`; `pol` is `"s"`, `"p"`
-  or `"u"` (unpolarized); `n_exit=` as in `stack_rt` (new in 0.8.0).
+  or `"u"` (unpolarized); `n_exit=` as in `stack_rt` (new in 0.8.0),
+  and `sub_thickness_um=` (new in 0.12.0).
   `layer_indices(n0, shape, kext)` builds `n0 * S + i k`.
 - Merits: `LinearMerit(weights, const, quantity)` (`w . X + const` for
   `X` = `R`, `T` or `A`), `TargetMerit` (closeness to a target
   spectrum), `SpecMarginMerit` (a smooth pass/fail margin; `J > 0`
   guarantees the specification), `FunctionMerit` (your own).
-- `OpticalModel(merit, conditions, kext, n_exit)` -- the merit, the
-  measuring conditions (a list of `(angle, polarization)`), the fixed
-  absorption of the layers and (new in 0.8.0) the medium behind a
-  thick substrate. `inverse_design`, `adam_ascent`,
+- `OpticalModel(merit, conditions, kext, n_exit, sub_thickness_um)`
+  -- the merit, the measuring conditions (a list of
+  `(angle, polarization)`), the fixed absorption of the layers, (new in
+  0.8.0) the medium behind a thick substrate and (new in 0.12.0) the
+  thickness of an absorbing substrate. `inverse_design`, `adam_ascent`,
   `random_search`, `robustify`, `cvar_objective_and_grad`,
   `evaluate_under_process`, `induced_merits`, `twin_fidelity_report`
   and `reoptimize_remaining` take it as `model=` (with `w, const`
@@ -1579,7 +1661,9 @@ example) gives the inputs, units and conventions.
 - `errors_from_traces(rt, rn, ft, fn)` -> error vectors;
   `apply_errors(t, n, x)` does the reverse.
 - `GaussianTwin(x, diagonal=False)` -- a normal distribution fitted to
-  error vectors; `sample_errors`, `sample`, and `transform(z)`
+  error vectors (sample covariance, divisor `M - 1`; `diagonal=True`
+  drops the correlations and, since 0.12.0, keeps the same variances);
+  `sample_errors`, `sample`, and `transform(z)`
   (`mu + L z`: turns standard normal random numbers `z` into error
   vectors, where `mu` is the mean and `L L^T` the covariance; this
   lets `robustify` hold the random numbers fixed while it takes
@@ -1590,7 +1674,8 @@ example) gives the inputs, units and conventions.
 **Risk and yield** (`fabtwin.risk`)
 
 - `cvar(values, alpha)` -- mean of the `ceil(alpha K)` smallest values
-  (Rockafellar and Uryasev, J. Risk 2, 21 (2000), lower tail).
+  (Rockafellar and Uryasev, J. Risk 2, 21 (2000), lower tail); NaN
+  values are refused (since 0.12.0).
 - `tail_statistics` -- mean, standard deviation, `100*alpha`
   percentile and CVaR.
 - `pass_fail(T, stop_mask, pass_mask, leak_max=0.09, pass_min=0.90)`
@@ -1663,7 +1748,9 @@ example) gives the inputs, units and conventions.
   index errors, optionally a parametric bootstrap (example 14); new in
   0.8.0: fields `at_bound_t`, `at_bound_n`, `chi2_pvalue`.
 - Both take `n_exit=` for a measured plate with its back face (new in
-  0.8.0, example 17). Both warn (`RuntimeWarning`, results unchanged)
+  0.8.0, example 17), and `sub_thickness_um=` for a plate that absorbs
+  (new in 0.12.0, example 23; also `recovery_precision`). Both warn
+  (`RuntimeWarning`, results unchanged)
   when an error sits on the edge of the search box, and, when the
   noise level is given, when the chi-square p-value is below 1e-6.
 - New in 0.9.0: `recovery_precision(lam, measurements, recipe_t, n0,
@@ -1695,7 +1782,8 @@ example) gives the inputs, units and conventions.
   sigma_signal=None, n_runs=None, seed=0, noise=None, ...,
   signal_offset=0.0)` -> `(n_runs, N)` deposited thicknesses: the same
   runs simulated layer by layer, without the linearization (example 22
-  and the tutorial on a whole monitored run).
+  and the tutorial on a whole monitored run). New in 0.12.0: in both,
+  `signal_offset` may be one value per stop, for a drifting monitor.
 
 **Planning** (`fabtwin.lab`)
 
@@ -1731,7 +1819,8 @@ example) gives the inputs, units and conventions.
 - `sample_twin`, `robustify_gan` (CVaR ascent through the generator
   and the JAX optics together; the paper's Stage 2).
 - `transmittance_jax`, `merit_jax` -- the optics in JAX, normal
-  incidence; `norm_recipe`, `init_models`, `gen_forward` -- building
+  incidence, lossless (complex inputs are refused since 0.12.0);
+  `norm_recipe`, `init_models`, `gen_forward` -- building
   blocks; `HAVE_JAX` -- whether JAX could be imported.
 
 ## When it refuses, and why
@@ -1829,16 +1918,25 @@ example) gives the inputs, units and conventions.
   that is not `(n_runs, N)` and finite, `noise` together with
   `sigma_signal` or `n_runs`, and a missing or non-whole `n_runs`. A
   simulated stop that the signal cannot reach on its branch of the
-  monitoring curve is NaN, with a warning, not a number.
+  monitoring curve is NaN, with a warning, not a number;
+- new in 0.12.0: `stack_rt`, `transmittance` and `reflectance` get
+  oblique incidence from an absorbing incidence medium (`n_inc sin
+  theta` would be complex); `sub_thickness_um` is given without
+  `n_exit`, or is not positive and finite, or the substrate has gain;
+  `cvar` (and so `tail_statistics`, `evaluate_under_process`,
+  `distribution_distances`) gets a NaN value, which cannot be ranked;
+  `transmittance_jax` (and so `merit_jax`, `robustify_gan`) gets a
+  complex input; `signal_offset` is neither a number nor one finite
+  value per layer.
 
 ## How the results are checked
 
-197 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+208 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
-check). Without JAX, 9 of the tests do not run (pytest reports the 6
-in `test_twin_jax.py` as one skipped module, plus 3 others). Numerical
+check). Without JAX, 10 of the tests do not run (pytest reports the 6
+in `test_twin_jax.py` as one skipped module, plus 4 others). Numerical
 checks compare against a closed-form answer, an independent code, or
 a second calculation; none compares against a number stored from an
 earlier run. Checks of random processes use fixed seeds and
@@ -2200,6 +2298,49 @@ statistical tolerances. The main checks:
   twin's CVaR within 3e-5 of the simulated runs', and a paired
   interval that excludes zero.
 
+**Absorbing plates, a drifting monitor and the 0.12.0 fixes**
+
+- An absorbing thick substrate (`sub_thickness_um`) agrees with the
+  incoherent solver `inc_tmm` of the independent `tmm` package, with
+  the substrate as an absorbing incoherent layer, to 1e-12 on 200
+  random plates: absorbing and lossless layers, s, p and unpolarized
+  light, angles up to 80 degrees, `k` of the substrate from 1e-8 to
+  1e-3 and thicknesses from 0.1 to 3 mm (single-pass power from about
+  1e-4 to 1), incidence and exit media of index 1 and 1.33; and on a
+  dispersive absorbing substrate given as an array.
+- A bare absorbing plate at normal incidence equals the closed form
+  `T = Tf Tb tau / (1 - R1^2 tau^2)`,
+  `R = R1 + Tf Tb R1 tau^2 / (1 - R1^2 tau^2)`, with
+  `R1 = |(n - 1)/(n + 1)|^2`, `Tf = 4 Re(n) / |1 + n|^2`,
+  `Tb = 4 |n|^2 / (Re(n) |1 + n|^2)` and `tau = exp(-4 pi k d / lam)`,
+  to 1e-14 in s, p and unpolarized light; for `k` going to 0 it goes to
+  the lossless `2n/(n^2+1)`; for a lossless substrate the thickness
+  changes nothing (exact equality).
+- Every derivative of `stack_rta_and_grads` on an absorbing plate
+  (`R`, `T`, `A` with respect to thickness, `n` and `k`) matches
+  central finite differences of the forward optics on 12 random stacks
+  (relative 1e-7 plus absolute 1e-8); `OpticalModel(sub_thickness_um=)`
+  spectra equal `stack_rt` (1e-13) and its merit gradient matches
+  finite differences (relative 1e-7).
+- From a plate spectrum computed by `tmm.inc_tmm` (1 mm, `k = 2e-5`),
+  `errors_from_spectrum` recovers the thickness errors to 1e-6 and
+  `errors_from_spectra` agrees with it (1e-8); with 0.2 % noise every
+  error is within 4 error bars, `recovery_precision` equals the
+  uncertainties the fit reports (relative 1e-6), and the same fit with
+  the absorption left out is flagged by the chi-square check.
+- With one offset per stop, simulated monitored runs equal an
+  independent simulation with SciPy's `brentq` on `stack_rt` (1e-12
+  um); offsets of size 1e-5 move the layers by `G o` (relative 1e-3,
+  the size of the second-order term); an array of equal offsets gives
+  exactly what the number gives.
+- The four fixes (see [Corrections](#corrections-in-earlier-versions))
+  each have a test that fails on 0.11.0: an absorbing incidence medium
+  agrees with the coherent solver `coh_tmm` of the `tmm` package to
+  1e-12 on 100 random stacks at normal incidence; `cvar` refuses a NaN;
+  the diagonal twin's variances equal the unbiased `(a - b)^2 / 2` of
+  two runs (relative 1e-12) and the full twin's diagonal; the JAX
+  solver refuses complex inputs, also inside `robustify_gan`.
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -2208,6 +2349,39 @@ generator matches finite differences to a relative 1e-5;
 works, not how good a trained twin is.
 
 ## Corrections in earlier versions
+
+**0.12.0 fixed four wrong answers.** None of them changes a README
+example or a tutorial.
+
+- *Light arriving from an absorbing medium.* `stack_rt` accepts an
+  incidence medium `n_inc = n + i k`, but up to 0.11.0 it computed `T`
+  with the formula for a lossless one, which understates `T` by the
+  factor `Re(eta0)^2 / |eta0|^2` (`eta0` is `n_inc` at normal
+  incidence). For 0.08 um of index 2.1 on 1.46 at 0.55 um, seen from a
+  medium of `1.5 + 0.3i`, it gave `T = 0.875537`; the independent `tmm`
+  package and 0.12.0 give 0.910558, the transmitted power divided by
+  the power of the incident wave. `R` was right. Oblique incidence
+  from an absorbing medium is now refused, as `tmm` refuses it. A
+  lossless incidence medium gives the same numbers as before, bit for
+  bit.
+- *A NaN merit counted as the best device.* `cvar` sorts the values,
+  and sorting puts NaN last, so a device whose merit could not be
+  computed was left out of the worst tail: `cvar([nan, 1, 2, ..., 9],
+  0.2)` gave 1.5, and `tail_statistics` showed that CVaR next to a NaN
+  mean. A NaN is now refused.
+- *The diagonal twin's variances.* `GaussianTwin(x, diagonal=True)`
+  divided by the number of runs `M`, the full twin by `M - 1`, so the
+  diagonal twin was not just the full twin without its correlations:
+  its variances were smaller by `(M - 1) / M`, half as large for 2
+  runs and 2.5 % smaller for 40. Both now divide by `M - 1`.
+- *Absorbing values in the JAX solver.* `transmittance_jax` (used by
+  `merit_jax`, `robustify_gan` and `train_wgan`) is written for
+  lossless stacks and uses the indices as given, without the
+  conjugation `fabtwin.tmm` applies to `n + i k`, but it did not refuse
+  complex values. For three layers of index 2.0 and 0.06 um on a
+  substrate of `1.5 + 0.2i`, it gave `T = 0.8249` at 0.45 um instead
+  of 0.7867, and for absorbing layers `T` above 1. Complex inputs are
+  now refused, as the hand adjoint has refused them since 0.6.1.
 
 **0.11.0 fixed two wrong answers.**
 
@@ -2345,13 +2519,39 @@ use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
 
+What 0.12.0 adds, and its limits:
+
+- **Absorbing plates.** `sub_thickness_um` lets a thick substrate
+  absorb. The model sums the bounces inside the plate in power, with a
+  loss on each pass, so it is for a plate much thicker than the
+  coherence length of the light, with flat, parallel faces and a bare
+  back face, as before. The value of `k` must come from your glass;
+  the package has no data for absorbing glasses. The incidence and
+  exit media must still be lossless. The monitoring functions do not
+  take `sub_thickness_um` and still refuse an absorbing substrate with
+  `n_exit`. In the tests the substrate's single-pass power runs from
+  about 1e-4 to 1 (the `tmm` package used for the comparison holds it
+  above 1e-30); a much more opaque plate gives `T` close to 0, as it
+  should, but is not compared.
+- **Absorbing incidence medium.** At normal incidence `T` is the
+  transmitted power divided by the power of the incident wave. In an
+  absorbing medium the incident and reflected waves interfere in the
+  power flow, so `R + T` is not 1 there even for a lossless stack;
+  `stack_rta_and_grads` (and so the design functions) still refuse an
+  absorbing incidence medium.
+- **A drifting monitor.** One signal offset per stop describes a
+  monitor whose calibration drifts; you supply the offsets (for example
+  from the drift rate and the time each layer is stopped). A drifting
+  deposition rate or index is still not modeled.
+
 What 0.11.0 adds, and its limits:
 
 - **Whole monitored runs.** `monitoring_errors` is first order in the
   signal errors. It assumes cut-offs fixed from the recipe before the
   run (not recomputed during it), independent noise at every stop,
   and nothing else changing during the run (deposition rate, index,
-  monitor drift). It refuses a run in which a layer ends too close to
+  monitor drift; since 0.12.0 a drifting monitor can be given as one
+  offset per stop). It refuses a run in which a layer ends too close to
   a turning point for the errors it receives; its check uses the
   curvature of that layer's own monitoring curve, not the second
   derivatives with respect to the layers below. In the tutorial its
@@ -2414,7 +2614,8 @@ What 0.8.0 changed about the limits of 0.7.0:
   stated noise or stopped by the search box. What is left: the
   substrate, incidence and exit media must be non-absorbing (an
   absorbing substrate would need its thickness and internal loss,
-  which are not modelled); the back face must be bare (uncoated) and
+  which are not modeled; lifted for the substrate in 0.12.0 with
+  `sub_thickness_um`, see above); the back face must be bare (uncoated) and
   flat; the substrate is assumed much thicker than the coherence
   length of the light (the fringes of a thin, coherent substrate are
   not modelled); and the chi-square warning is only as good as the

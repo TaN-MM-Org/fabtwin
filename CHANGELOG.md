@@ -1,5 +1,119 @@
 # Changelog
 
+## 0.12.0 (2026-11-10)
+
+A thick substrate that absorbs, one monitor offset per stop (a
+drifting monitor), and four fixes: the transmittance from an absorbing
+incidence medium, NaN merits in `cvar`, the variances of the diagonal
+Gaussian twin, and complex inputs to the JAX solver.
+
+### Added
+
+- `sub_thickness_um=` in `stack_rt`, `transmittance`, `reflectance`,
+  `stack_rta_and_grads`, `errors_from_spectrum`, `errors_from_spectra`
+  and `recovery_precision`, and the field `OpticalModel.sub_thickness_um`:
+  with `n_exit`, the thickness of the substrate in um (1000.0 for a
+  1 mm plate). With it the substrate may absorb (`n_sub = n + i k`,
+  `k > 0`, a scalar or one value per wavelength), which 0.8.0 to 0.11.0
+  refused. Each pass through the substrate keeps the fraction
+  `tau = exp(-4 pi d Im(n cos theta) / lam)` of the power, so the back
+  face's `Rb` and `Tb` in the incoherent power sum become `Rb tau^2`
+  and `Tb tau`; `A = 1 - R - T` then includes the power the substrate
+  absorbs. Exact derivatives with respect to every layer thickness,
+  `n` and `k`, as before. For a lossless substrate the thickness is
+  not used and the numbers are those of 0.11.0, bit for bit. Refused:
+  an absorbing substrate without `sub_thickness_um` (as before),
+  `sub_thickness_um` without `n_exit`, a thickness that is not
+  positive and finite, a substrate with gain. Not available in the
+  monitoring functions, which still refuse an absorbing substrate with
+  `n_exit`.
+- `signal_offset` of `monitoring_errors` and `simulate_monitored_runs`
+  may be an `(N,)` array, one offset per stop (indexed like the
+  recipe), for a monitor whose calibration drifts during the run; then
+  `mean_t = G o`. A number means the same offset at every stop, as
+  before, with the same numbers.
+- README example 23 (a coated plate of a glass that absorbs a little).
+
+### Fixed
+
+- The transmittance from an absorbing incidence medium. `stack_rt`,
+  `transmittance` and `reflectance` accept an incidence medium
+  `n_inc = n + i k`, but used the lossless formula
+  `T = 4 Re(eta0) Re(eta_sub) / |eta0 B + C|^2` there, which
+  understates `T` by the factor `Re(eta0)^2 / |eta0|^2`. `T` is now
+  the transmitted power divided by the power of the incident wave,
+  `4 |eta0|^2 Re(eta_sub) / (Re(eta0) |eta0 B + C|^2)`, the definition
+  of the independent `tmm` package; `R` is unchanged. Before -> after,
+  0.08 um of index 2.1 on 1.46 at 0.55 um, normal incidence:
+  `n_inc = 1.5 + 0.3i`: `T` 0.875537 -> 0.910558 (`tmm.coh_tmm`:
+  0.910558); `n_inc = 1.5 + 0.05i`: 0.895372 -> 0.896367. Oblique
+  incidence from an absorbing medium is now refused (`n_inc sin(theta)`
+  would be complex; `tmm` refuses it too); 0.11.0 returned
+  `T = 0.889325` for the first case at 0.3 rad (s). A lossless
+  incidence medium is not affected, bit for bit. Test:
+  `test_v012.py::test_absorbing_incidence_medium_matches_the_open_tmm_solver`.
+- `cvar` with NaN merits. `np.sort` puts NaN last, so a device whose
+  merit could not be computed was left out of the worst tail as if it
+  were the best one, and `tail_statistics` and
+  `evaluate_under_process` reported a finite CVaR next to a NaN mean.
+  Before -> after: `cvar([nan, 1, 2, ..., 9], 0.2)` 1.5 -> ValueError
+  (naming the number of NaN values). `tail_statistics`,
+  `evaluate_under_process` and `distribution_distances` refuse NaN in
+  the same way. Finite values,
+  and infinite ones, are unchanged. Test:
+  `test_v012.py::test_cvar_refuses_nan_merits`.
+- The variances of the diagonal Gaussian twin. `GaussianTwin(x,
+  diagonal=True)` divided by the number of runs `M` (`numpy.var`)
+  while the full twin divides by `M - 1` (`numpy.cov`), so the
+  diagonal twin was not the full twin without its correlations: its
+  variances were smaller by the factor `(M - 1) / M`. Before -> after,
+  two runs `[0.010, -0.004, 0.02]` and `[0.030, 0.002, -0.01]`:
+  variances `[1.0e-4, 9.0e-6, 2.25e-4]` -> `[2.0e-4, 1.8e-5, 4.5e-4]`,
+  the unbiased `(a - b)^2 / 2`; for 40 runs, diagonal / full
+  0.975 -> 1. `TwinEnsemble(diagonal=True)` changes in the same way.
+  No README example or tutorial uses a diagonal twin. Test:
+  `test_v012.py::test_diagonal_twin_has_the_variances_of_the_full_twin`.
+- Complex inputs to the JAX solver. `transmittance_jax` (and so
+  `merit_jax`, `robustify_gan` and the tail calibration of
+  `train_wgan`) uses the indices as given, without the conjugation
+  `fabtwin.tmm` applies to `n + i k`, and did not refuse complex
+  values. Before -> after, three layers of index 2.0 and 0.06 um at
+  0.45 um: on a substrate of `1.5 + 0.2i`, `T` 0.8249 -> ValueError
+  (`fabtwin.tmm` and the `tmm` package: 0.7867); layers of
+  `2.0 + 0.05i` on 1.5, `T` 1.0075 (above 1) -> ValueError
+  (`fabtwin.tmm`: 0.6414). A complex wavelength, thickness, index,
+  shape, incidence or substrate index is now refused, also inside
+  `jax.jit` and `jax.grad`, as the hand adjoint has refused them since
+  0.6.1. Real inputs are unchanged. Test:
+  `test_v012.py::test_jax_solver_refuses_complex_inputs`.
+
+### Changed
+
+- `fabtwin.tmm` and `fabtwin.gradients` (internal): the
+  thick-substrate helper also returns the substrate thickness, and the
+  reversed-stack solves (the coating seen from inside an absorbing
+  substrate) use the incident-power definition of `T` above; the
+  public calls are unchanged apart from the new keyword.
+- CI: the test jobs run on `ubuntu-24.04` instead of `ubuntu-latest`,
+  for reproducible runs.
+- README: example 23, a note on per-stop offsets in example 22, the
+  new keyword and refusals, checks, corrections and limits.
+
+### Tests
+
+208 tests (197 in 0.11.0): new file `test_v012.py` (11). Independent
+references: the incoherent solver `inc_tmm` of the `tmm` package with
+an absorbing incoherent substrate (200 random plates) and its coherent
+solver `coh_tmm` with an absorbing incidence medium (100 random
+stacks); the closed form of a bare absorbing plate, written out by
+hand; central finite differences of the forward optics for every
+derivative on an absorbing plate; a plate spectrum computed by
+`inc_tmm` for the recovery; scipy's `brentq` on `stack_rt` for runs
+with one offset per stop; the unbiased variance `(a - b)^2 / 2` of
+two values. Each of the four fixes has a test that fails on 0.11.0
+and passes now. The README examples 1 to 22 and the three tutorials
+print the same as with 0.11.0.
+
 ## 0.11.0 (2026-10-18)
 
 The thickness errors of a whole monitored run, two fixes, faster
