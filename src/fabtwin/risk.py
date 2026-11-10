@@ -60,10 +60,22 @@ def _ceil_count(x: float) -> int:
 
 
 def cvar(values, alpha: float) -> float:
-    """Lower-tail CVaR: mean of the ceil(alpha K) smallest values."""
+    """Lower-tail CVaR: mean of the ceil(alpha K) smallest values.
+
+    NaN values are refused (new in 0.12.0). Sorting puts NaN last, so up
+    to 0.11.0 a device whose merit could not be computed was silently
+    treated as the best one and left out of the tail: `cvar` of
+    [nan, 1, 2, ..., 9] at alpha = 0.2 gave 1.5, the mean of 1 and 2,
+    while `tail_statistics` reported a NaN mean next to it."""
     v = np.asarray(values, dtype=float).ravel()
     if v.size == 0:
         raise ValueError("need at least one sample")
+    if np.any(np.isnan(v)):
+        raise ValueError(
+            f"{int(np.sum(np.isnan(v)))} of {v.size} values are NaN (a "
+            "merit that could not be computed): a NaN cannot be ranked, "
+            "so the worst values are unknown. Find out why, and drop or "
+            "replace those values explicitly")
     if not (0.0 < alpha <= 1.0):
         raise ValueError(f"alpha must lie in (0, 1]; got {alpha!r}")
     q = max(1, _ceil_count(alpha * v.size))

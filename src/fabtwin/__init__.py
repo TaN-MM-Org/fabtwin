@@ -48,7 +48,7 @@ from .correct import reoptimize_remaining
 from .monitor import (MonitoringErrors, MonitoringPlan, monitoring_errors,
                       monitoring_plan, simulate_monitored_runs)
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = [
     "SellmeierMaterial", "TabulatedMaterial", "SI3N4_LUKE2015",
     "SIO2_MALITSON1965",

@@ -56,10 +56,29 @@ def _require_jax():
 
 
 def transmittance_jax(lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0):
-    """Normal-incidence T(lam) in JAX; equals fabtwin.tmm to 1e-12
-    (asserted in the tests), with exact autodiff gradients that the
-    tests hold against the hand adjoint."""
+    """Normal-incidence T(lam) of a lossless stack in JAX; equals
+    fabtwin.tmm to 1e-12 (asserted in the tests), with exact autodiff
+    gradients that the tests hold against the hand adjoint.
+
+    Every input must be real (new check in 0.12.0), as for the hand
+    adjoint of `fabtwin.adjoint`: this solver uses the indices as given,
+    without the conjugation that `fabtwin.tmm` applies to n + i k, so up
+    to 0.11.0 an absorbing substrate or layer gave a wrong T without any
+    sign (for three layers of index 2.0 and 0.06 um on a substrate of
+    1.5 + 0.2i at 0.45 um, 0.8249 where `fabtwin.tmm` and the `tmm`
+    package give 0.7867; T above 1 for absorbing layers). Use
+    `fabtwin.tmm` for absorbing stacks."""
     _require_jax()
+    for name, a in (("lam_um", lam_um), ("t_um", t_um), ("n0", n0),
+                    ("shape", shape), ("n_inc", n_inc), ("n_sub", n_sub)):
+        # the dtype is known while tracing, so this check also works
+        # inside jax.jit and jax.grad
+        if jnp.iscomplexobj(a):
+            raise ValueError(
+                f"transmittance_jax covers lossless stacks only: {name} is "
+                "complex. Its indices are used without the conjugation of "
+                "fabtwin.tmm, so an absorbing (n + i k) value would give a "
+                "wrong T; use fabtwin.tmm for absorbing stacks")
     lam = jnp.asarray(lam_um)
     S = jnp.asarray(shape)
     if S.ndim == 1:

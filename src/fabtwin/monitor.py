@@ -55,7 +55,9 @@ after every layer), and it does not model drift of the monitor or of
 the deposition rate. Since 0.11.0, `monitoring_errors` carries the
 errors of each layer into the stops of the layers after it (cut-offs
 fixed from the recipe), and `simulate_monitored_runs` simulates such
-runs without linearization; see their docstrings. The monitor beam arrives from the incidence medium
+runs without linearization; see their docstrings. Since 0.12.0 both
+take one signal offset per stop, for a monitor whose calibration
+drifts during the run. The monitor beam arrives from the incidence medium
 (`n_inc`, the chamber's vacuum, 1.0, by default) on the growing side
 of the coating.
 """
@@ -283,16 +285,20 @@ class MonitoringErrors:
     recipe_t_um : (N,) the recipe; lam_mon_um, quantity : as in
         `MonitoringPlan`; order : (N,) deposition order.
     sigma_signal, signal_offset : the stated one-sigma noise of the
-        monitor signal at each stop, and a constant offset of the
-        measured signal (a calibration error), both as fractions.
+        monitor signal at each stop, and the offset of the measured
+        signal (a calibration error), both as fractions; the offset is a
+        number (the same at every stop) or, since 0.12.0, an (N,) array
+        indexed like the recipe (one value per stop: a drifting
+        monitor).
     sensitivity : (N, N) A[j, k] = d S_j / d t_k at the recipe, where
         S_j is the true signal at the moment layer j is stopped; it
         depends on layer j and on the layers below it (k >= j), so A is
         upper triangular.
     propagation : (N, N) G = -A^-1, the thickness errors per unit
-        signal error at each stop: dt = G (e + signal_offset), with e
-        the (N,) noise at the stops.
-    mean_t : (N,) G applied to the offset (zero without an offset).
+        signal error at each stop: dt = G (e + o), with e the (N,) noise
+        and o the (N,) offsets at the stops.
+    mean_t : (N,) G o, the thickness errors the offsets cause (zero
+        without an offset).
     covariance : (N, N) sigma_signal^2 G G^T; sigma_t : (N,) the square
         roots of its diagonal; correlation : (N, N).
     rel_mean_t, rel_sigma_t, rel_covariance : the same for the relative
@@ -365,6 +371,25 @@ def _check_run_inputs(lam_mon_um, recipe_t_um, n_layers, quantity):
     return lam_mon, t, n
 
 
+def _offsets(signal_offset, N):
+    """(the offset as stored, the (N,) offset at every stop). A number
+    is the same at every stop, as before 0.12.0; an (N,) array (new in
+    0.12.0) gives one value per stop, indexed like the recipe."""
+    a = np.asarray(signal_offset, dtype=float)
+    if a.ndim == 0:
+        off = float(a)
+        if not np.isfinite(off):
+            raise ValueError("signal_offset must be finite")
+        return off, np.full(N, off)
+    if a.shape != (N,):
+        raise ValueError(f"signal_offset must be a number or an ({N},) "
+                         "array, one value per layer (indexed like the "
+                         "recipe)")
+    if not np.all(np.isfinite(a)):
+        raise ValueError("signal_offset must be finite")
+    return a.copy(), a.copy()
+
+
 def _quarter_wave(lam_mon, nj, n_inc, theta0_rad):
     s0 = float(np.real(n_inc)) * np.sin(float(theta0_rad))
     q = np.sqrt(complex(nj) ** 2 - s0 ** 2)
@@ -398,15 +423,15 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
     the recipe, so the errors already made shift its stop. To first
     order, with S_j the true signal when layer j is stopped (a function
     of t_j and of the thicknesses below it), e_j the signal noise at
-    that stop and o a constant offset of the measured signal,
+    that stop and o_j the offset of the measured signal there,
 
-        sum over k >= j of A[j, k] dt_k = -(e_j + o),
+        sum over k >= j of A[j, k] dt_k = -(e_j + o_j),
         A[j, k] = d S_j / d t_k at the recipe,
 
     so dt = G (e + o) with G = -A^-1, and for independent noise of
     standard deviation sigma_signal at every stop
 
-        mean(dt) = o G 1,   cov(dt) = sigma_signal^2 G G^T.
+        mean(dt) = G o,   cov(dt) = sigma_signal^2 G G^T.
 
     The derivatives are the exact ones of `fabtwin.gradients`. The
     errors of different layers are correlated, and an error can grow or
@@ -418,9 +443,13 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
         monitor wavelength).
     sigma_signal : one-sigma noise of the signal at each stop, as a
         fraction (required, > 0).
-    signal_offset : a constant error of the measured signal, the same at
-        every stop (for example a calibration offset of the monitor), as
-        a fraction; default 0.
+    signal_offset : an error of the measured signal, as a fraction;
+        default 0. A number is the same at every stop (for example a
+        calibration offset of the monitor). An (N,) array (new in
+        0.12.0), indexed like the recipe, gives the offset at the stop of
+        each layer, for a monitor whose calibration drifts during the
+        run (for a drift in time, the user converts it into the offset
+        at the moment each layer is stopped).
     max_nonlinearity : refusal threshold on `nonlinearity` (as in
         `monitoring_plan`, but with the propagated error of each layer).
 
@@ -435,7 +464,8 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
     the message names the layers). The model: the cut-offs are fixed
     from the recipe before the run (not recomputed during it), the
     noise at different stops is independent, and nothing else
-    (deposition rate, index, monitor drift) changes during the run.
+    (deposition rate, index) changes during the run; a monitor that
+    drifts enters only through the per-stop offsets.
     `simulate_monitored_runs` simulates the same model without the
     linearization; the tests compare the two.
     """
@@ -445,9 +475,7 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
     if not (np.isfinite(sig) and sig > 0):
         raise ValueError("sigma_signal must be positive and finite (a "
                          "fraction: 0.001 for 0.1 %)")
-    off = float(signal_offset)
-    if not np.isfinite(off):
-        raise ValueError("signal_offset must be finite")
+    off, off_vec = _offsets(signal_offset, t.size)
     mnl = float(max_nonlinearity)
     if not (mnl > 0):
         raise ValueError("max_nonlinearity must be positive")
@@ -476,7 +504,7 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
     # A is upper triangular: G = -A^-1 by back substitution
     from scipy.linalg import solve_triangular
     G = -solve_triangular(A, np.eye(N), lower=False)
-    mean = G @ np.full(N, off)
+    mean = G @ off_vec
     cov = sig ** 2 * (G @ G.T)
     cov = 0.5 * (cov + cov.T)
     sd = np.sqrt(np.diag(cov))
@@ -525,7 +553,8 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
     the turning points.
 
     lam_mon_um, recipe_t_um, n_layers, n_inc, n_sub, quantity,
-    theta0_rad, pol, n_exit, signal_offset : as in `monitoring_errors`.
+    theta0_rad, pol, n_exit, signal_offset : as in `monitoring_errors`
+        (signal_offset a number, or one value per stop since 0.12.0).
     sigma_signal, n_runs, seed : draw the noise e as independent normal
         values of standard deviation sigma_signal, (n_runs, N), from
         `numpy.random.default_rng(seed)` (seed may also be a Generator);
@@ -544,9 +573,7 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
     lam_mon, t, n = _check_run_inputs(lam_mon_um, recipe_t_um, n_layers,
                                       quantity)
     N = t.size
-    off = float(signal_offset)
-    if not np.isfinite(off):
-        raise ValueError("signal_offset must be finite")
+    _, off = _offsets(signal_offset, N)
     if noise is not None:
         if sigma_signal is not None or n_runs is not None:
             raise ValueError("give either noise, or sigma_signal and "
@@ -599,7 +626,7 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
         rows = np.nonzero(alive)[0]
         if rows.size == 0:
             break
-        target = cut[0] - off - e[rows, j]
+        target = cut[0] - off[j] - e[rows, j]
         qw = _quarter_wave(lam_mon, n[j], n_inc, theta0_rad)
         x0 = np.full(rows.size, t[j])
         v0, s0 = sig_at(j, x0, rows)

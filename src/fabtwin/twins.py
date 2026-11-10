@@ -51,6 +51,12 @@ class GaussianTwin:
     """Gaussian corruption model fitted to traces (diagonal or full
     covariance) -- the parametric baseline the learned twin is scored
     against, and the differentiable reference twin of the numpy core.
+
+    Both variants use the sample covariance with divisor M - 1 (that of
+    numpy.cov); the diagonal twin is the full twin with its correlations
+    set to zero. (Up to 0.11.0 the diagonal twin divided by M instead,
+    so its variances were smaller by the factor (M - 1) / M: half the
+    full twin's for 2 runs, 0.975 times for 40.)
     """
 
     def __init__(self, x_traces, diagonal=False, jitter=1e-9):
@@ -60,7 +66,7 @@ class GaussianTwin:
         self.dim = x.shape[1]
         self.mu = x.mean(axis=0)
         if diagonal:
-            self.cov = np.diag(x.var(axis=0) + jitter)
+            self.cov = np.diag(x.var(axis=0, ddof=1) + jitter)
         else:
             self.cov = np.cov(x.T) + jitter * np.eye(self.dim)
         self.L = np.linalg.cholesky(self.cov)

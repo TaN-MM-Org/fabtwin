@@ -53,6 +53,11 @@ each layer error (and refuses a plan that cannot determine them), so
 the angles, polarizations, R or T and noise level of a measurement can
 be chosen first. Measured spectra exported by an instrument are read by
 `fabtwin.data.load_spectrum_csv`.
+
+New in 0.12.0: with `n_exit`, `sub_thickness_um=` (the substrate
+thickness in um) lets the measured plate absorb a little (see
+`fabtwin.tmm.stack_rt`); the tests recover the thickness errors from a
+plate spectrum computed by the independent `tmm` package.
 """
 from __future__ import annotations
 
@@ -170,7 +175,8 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
                          n_inc=1.0, n_sub=1.0, sigma_T=None,
                          max_error=0.10, n_starts=8, seed=0,
                          chi2_rtol=1e-3, distinct_atol=1e-4,
-                         n_exit=None) -> SpectrumRecovery:
+                         n_exit=None,
+                         sub_thickness_um=None) -> SpectrumRecovery:
     """Per-layer relative thickness errors from one measured T(lam).
 
     lam_um, T_meas : the measured spectrum (transmittance in [0, 1]).
@@ -192,6 +198,9 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     coated plate, back face included; fitting such a spectrum with
     n_exit=None asks the layers to explain the back-face loss (about
     4 % for glass in air) and gives wrong errors.
+    sub_thickness_um : with n_exit, the substrate thickness (um), which
+    lets the substrate absorb (n_sub = n + i k; new in 0.12.0, see
+    `fabtwin.tmm.stack_rt`). The layers must still be lossless here.
 
     Returns a `SpectrumRecovery`. Raises ValueError when the recovery
     is underdetermined, degenerate, or non-unique (module docstring).
@@ -220,6 +229,9 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
             raise ValueError("sigma_T must be positive and finite")
         w = 1.0 / sig
 
+    if sub_thickness_um is not None and n_exit is None:
+        raise ValueError("sub_thickness_um is the thickness of a thick "
+                         "substrate with a back face; it needs n_exit")
     if n_exit is None:
         def T_and_dTdt(tt):
             T, dT_dt, _ = transmittance_and_grads(lam, tt, n0, shape,
@@ -228,14 +240,18 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
             return T, dT_dt
     else:
         from .gradients import layer_indices, stack_rta_and_grads
-        # the lossless-design checks of the adjoint path, kept
-        transmittance_and_grads(lam, t0, n0, shape, n_inc=n_inc,
-                                n_sub=n_sub)
+        # the lossless-design checks of the adjoint path, kept (with a
+        # substrate thickness the substrate may absorb, so only its real
+        # part goes through these checks; stack_rta_and_grads checks it)
+        transmittance_and_grads(
+            lam, t0, n0, shape, n_inc=n_inc,
+            n_sub=n_sub if sub_thickness_um is None else np.real(n_sub))
         n_lay = layer_indices(np.asarray(n0, dtype=float), shape)
 
         def T_and_dTdt(tt):
             g = stack_rta_and_grads(lam, tt, n_lay, n_inc, n_sub, 0.0,
-                                    "s", n_exit=n_exit)
+                                    "s", n_exit=n_exit,
+                                    sub_thickness_um=sub_thickness_um)
             return g["T"], g["dT_dt"]
 
     def resid(x):
@@ -366,7 +382,7 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
                         max_error=0.10, max_index_error=0.10, n_starts=8,
                         seed=0, chi2_rtol=1e-3, distinct_atol=1e-4,
                         cond_max=1e10, n_boot=0,
-                        n_exit=None) -> JointRecovery:
+                        n_exit=None, sub_thickness_um=None) -> JointRecovery:
     """Per-layer thickness errors -- and, if asked, index errors -- from
     one or SEVERAL measured spectra (new in 0.7.0).
 
@@ -400,6 +416,9 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
     n_exit : None or the real index behind a thick, lossless substrate
         with a bare back face (new in 0.8.0; see
         `errors_from_spectrum`). Applies to every measurement.
+    sub_thickness_um : with n_exit, the substrate thickness (um), which
+        lets the substrate absorb (new in 0.12.0; see
+        `fabtwin.tmm.stack_rt`).
     """
     from .gradients import layer_indices, stack_rta_and_grads
     lam = np.asarray(lam_um, dtype=float)
@@ -468,7 +487,8 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         pred, jac = [], []
         for m in meas:
             g = stack_rta_and_grads(lam, t, n, n_inc, n_sub,
-                                    m.theta0_rad, m.pol, n_exit=n_exit)
+                                    m.theta0_rad, m.pol, n_exit=n_exit,
+                                    sub_thickness_um=sub_thickness_um)
             q = m.quantity
             pred.append(g[q])
             Jt = (g[f"d{q}_dt"] * t0[:, None]).T             # (L, N)
@@ -627,7 +647,8 @@ class RecoveryPlan:
 def recovery_precision(lam_um, measurements, recipe_t_um, n0, shape,
                        fit_index=False, kext=None, n_inc=1.0, n_sub=1.0,
                        n_exit=None, at_dt_over_t=None, at_dn=None,
-                       cond_max: float = 1e10) -> RecoveryPlan:
+                       cond_max: float = 1e10,
+                       sub_thickness_um=None) -> RecoveryPlan:
     """Predicted uncertainties of the layer errors that a planned set of
     measurements would give, BEFORE measuring (new in 0.9.0).
 
@@ -638,7 +659,7 @@ def recovery_precision(lam_um, measurements, recipe_t_um, n0, shape,
     planned spectra.
 
     lam_um, recipe_t_um, n0, shape, fit_index, kext, n_inc, n_sub,
-    n_exit : as in `errors_from_spectra`.
+    n_exit, sub_thickness_um : as in `errors_from_spectra`.
     measurements : list of `Measurement` describing the plan. Their
         `values` are ignored (pass None); each `sigma` (scalar or (L,),
         the expected one-standard-deviation noise) is REQUIRED, because
@@ -737,7 +758,8 @@ def recovery_precision(lam_um, measurements, recipe_t_um, n0, shape,
     rows = []
     for m in meas:
         g = stack_rta_and_grads(lam, t, n, n_inc, n_sub, m.theta0_rad,
-                                m.pol, n_exit=n_exit)
+                                m.pol, n_exit=n_exit,
+                                sub_thickness_um=sub_thickness_um)
         q = m.quantity
         Jt = (g[f"d{q}_dt"] * t0[:, None]).T                  # (L, N)
         Jn = (g[f"d{q}_dn"] * S).T[:, mask]                   # (L, nf)

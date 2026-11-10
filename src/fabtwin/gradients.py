@@ -38,7 +38,10 @@ also beyond the critical angle; and (with the [twin] extra) it matches
 automatic differentiation of a separate JAX implementation.
 
 Scope, stated plainly: the incidence medium must be lossless (real
-index), as for any angle-resolved power measurement; a layer whose
+index), as for any angle-resolved power measurement (internally, the
+coating seen from inside an absorbing thick substrate is the one
+exception, new in 0.12.0; there T is the transmitted power divided by
+the power of the incident wave, as in `fabtwin.tmm`); a layer whose
 q = n' cos(theta) is (numerically) zero -- exactly at the critical
 angle of a lossless layer -- has no derivative there and is refused.
 """
@@ -46,7 +49,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .tmm import _cos_branch, _opaque_columns, _scaled_cos_sin
+from .tmm import (_cos_branch, _incident_power_factor, _opaque_columns,
+                  _scaled_cos_sin)
 
 __all__ = ["stack_rta_and_grads", "layer_indices"]
 
@@ -106,6 +110,11 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, s0, pol):
     if pol == "p" and np.any(np.abs(cos_s) == 0.0):
         raise ValueError("the substrate is exactly at its critical angle; "
                          "the p admittance is infinite there")
+    ninc = np.asarray(n_inc)
+    if np.iscomplexobj(ninc) and np.any(np.imag(ninc) != 0):
+        # internal only (new in 0.12.0): an absorbing thick substrate
+        # seen from inside, as the incidence medium of the reversed stack
+        n_inc = np.conj(ninc)
     cos_0 = _cos_branch(np.asarray(n_inc, dtype=np.complex128), s0)
     if pol == "s":
         eta = q
@@ -170,6 +179,9 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, s0, pol):
     T = 4.0 * np.real(eta0) * np.real(eta_sub) / np.abs(D) ** 2
     if np.any(big):
         T = np.where(big, T * np.exp(-2.0 * np.where(big, msum, 0.0)), T)
+    fac = _incident_power_factor(eta0)       # absorbing incidence (0.12.0)
+    if fac is not None:
+        T = T * fac
 
     # dM/d(delta) and dM/d(eta) applied to the suffix vector
     dd0 = -s * R0 + 1j * c / eta * R1
@@ -206,9 +218,10 @@ def _one_pol(lam, t, n_layers, n_inc, n_sub, s0, pol):
     return out
 
 
-def _thick_one_pol(lam, t, n, n_inc, n_sub, n_exit, s0, pol):
-    """Thick lossless substrate with a bare back face (incoherent power
-    sum; `fabtwin.tmm.stack_rt` gives the formulas), with the exact
+def _thick_one_pol(lam, t, n, n_inc, n_sub, n_exit, s0, pol,
+                   sub_d=None):
+    """Thick substrate with a bare back face (incoherent power sum;
+    `fabtwin.tmm.stack_rt` gives the formulas), with the exact
     derivatives by the product and quotient rules:
 
         T = Tf Tb / d,   R = Rf + Tf Tr Rb / d,   d = 1 - Rr Rb,
@@ -217,12 +230,20 @@ def _thick_one_pol(lam, t, n, n_inc, n_sub, n_exit, s0, pol):
 
     where the reversed-stack quantities (Rr, Tr and their derivatives)
     come from the same adjoint with the layer order flipped, and the
-    back face (Rb, Tb) does not depend on the layers."""
+    back face (Rb, Tb) does not depend on the layers. An absorbing
+    substrate of thickness sub_d (new in 0.12.0) replaces Rb by
+    Rb tau^2 and Tb by Tb tau, with the single-pass power fraction tau,
+    which does not depend on the layers either."""
+    from .tmm import _check_round_trip, _substrate_pass
     f = _one_pol(lam, t, n, n_inc, n_sub, s0, pol)
     r = _one_pol(lam, t[::-1], n[::-1], n_sub, n_inc, s0, pol)
     b = _one_pol(lam, np.zeros(0), np.zeros((0, lam.size)), n_sub,
                  n_exit, s0, pol)
     Rb, Tb = b["R"], b["T"]
+    tau = _substrate_pass(lam, n_sub, s0, sub_d)
+    if tau is not None:
+        Rb, Tb = Rb * tau * tau, Tb * tau
+        _check_round_trip(r["R"] * Rb)
     d = 1.0 - r["R"] * Rb
     out = dict(R=f["R"] + f["T"] * r["T"] * Rb / d,
                T=f["T"] * Tb / d)
@@ -237,7 +258,8 @@ def _thick_one_pol(lam, t, n, n_inc, n_sub, n_exit, s0, pol):
 
 
 def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                        theta0_rad=0.0, pol="s", n_exit=None):
+                        theta0_rad=0.0, pol="s", n_exit=None,
+                        sub_thickness_um=None):
     """R, T, A and their exact derivatives for any stack and angle.
 
     lam_um : (L,) wavelengths; t_um : (N,) thicknesses; n_layers :
@@ -249,7 +271,10 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     or the real index behind a thick, lossless substrate with a bare
     back face; R, T, A are then those of the whole sample, as a
     spectrophotometer measures a coated plate (see
-    `fabtwin.tmm.stack_rt`). The substrate must then be lossless.
+    `fabtwin.tmm.stack_rt`). The substrate must then be lossless, or
+    (new in 0.12.0) absorbing with its thickness given as
+    sub_thickness_um (um); A then includes the power the substrate
+    absorbs.
 
     Returns a dict with R, T, A (L,) and, each (N, L), the derivatives
     with respect to every layer thickness (dR_dt, dT_dt, dA_dt), the
@@ -261,11 +286,11 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     if lam.ndim != 1 or t.ndim != 1:
         raise ValueError("lam_um and t_um must be 1-D")
     return _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
-                          n_exit)
+                          n_exit, sub_thickness_um)
 
 
 def _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
-                   n_exit):
+                   n_exit, sub_thickness_um=None):
     # the body of stack_rta_and_grads; t may also be (N, L) here
     n = np.asarray(n_layers)
     if n.ndim == 1:
@@ -286,6 +311,9 @@ def _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
         raise ValueError("theta0_rad must lie in [0, pi/2)")
     if pol not in ("s", "p", "u"):
         raise ValueError("pol must be 's', 'p' or 'u'")
+    if sub_thickness_um is not None and n_exit is None:
+        raise ValueError("sub_thickness_um is the thickness of a thick "
+                         "substrate with a back face; it needs n_exit")
     if n_exit is None:
         s0 = n_inc * np.sin(th)
 
@@ -293,11 +321,11 @@ def _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
             return _one_pol(lam, t, n, n_inc, n_sub, s0, p)
     else:
         from .tmm import _thick_substrate_media
-        n_inc, ns, ne, s0 = _thick_substrate_media(lam, n_inc, n_sub,
-                                                  n_exit, th)
+        n_inc, ns, ne, s0, sub_d = _thick_substrate_media(
+            lam, n_inc, n_sub, n_exit, th, sub_thickness_um)
 
         def one(p):
-            return _thick_one_pol(lam, t, n, n_inc, ns, ne, s0, p)
+            return _thick_one_pol(lam, t, n, n_inc, ns, ne, s0, p, sub_d)
     if pol in ("s", "p"):
         out = one(pol)
     else:

@@ -178,12 +178,16 @@ class OpticalModel:
         substrate with a bare back face (1.0 for air; new in 0.8.0).
         The spectra are then those of the whole coated plate, as a
         spectrophotometer measures it (`fabtwin.tmm.stack_rt`).
+    sub_thickness_um : None (default) or, with n_exit, the substrate
+        thickness in um, which lets the substrate absorb (n_sub with
+        k > 0; new in 0.12.0, see `fabtwin.tmm.stack_rt`).
     """
 
     merit: object
     conditions: tuple = ((0.0, "s"),)
     kext: object = None
     n_exit: object = None
+    sub_thickness_um: object = None
 
     def __post_init__(self):
         c = self.conditions
@@ -210,6 +214,18 @@ class OpticalModel:
                     not np.all(np.isfinite(ne)) or np.any(ne <= 0):
                 raise ValueError("n_exit must be None, or a positive real "
                                  "scalar or (L,) array")
+        if self.sub_thickness_um is not None:
+            if self.n_exit is None:
+                raise ValueError("sub_thickness_um needs n_exit (it is the "
+                                 "thickness of a thick substrate with a "
+                                 "back face)")
+            try:
+                d = float(self.sub_thickness_um)
+            except (TypeError, ValueError):
+                d = float("nan")
+            if not (np.isfinite(d) and d > 0):
+                raise ValueError("sub_thickness_um must be positive and "
+                                 "finite (um)")
 
 
 def model_spectra(model, lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0,
@@ -218,7 +234,8 @@ def model_spectra(model, lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0,
     grads=True, the per-condition gradient dicts)."""
     n = layer_indices(n0, shape, model.kext)
     out = [stack_rta_and_grads(lam_um, t_um, n, n_inc, n_sub, a, p,
-                               n_exit=model.n_exit)
+                               n_exit=model.n_exit,
+                               sub_thickness_um=model.sub_thickness_um)
            for a, p in model.conditions]
     R = np.array([o["R"] for o in out])
     T = np.array([o["T"] for o in out])

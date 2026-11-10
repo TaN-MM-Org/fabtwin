@@ -30,7 +30,11 @@ by summing the multiple reflections between them in power
 (incoherently), which is how a spectrophotometer sees a coated plate
 much thicker than the coherence length of its light; the tests hold
 this to the incoherent solver `inc_tmm` of the same `tmm` reference
-and to the closed-form bare plate T = 2n / (n^2 + 1).
+and to the closed-form bare plate T = 2n / (n^2 + 1). Since 0.12.0 the
+substrate may absorb when its thickness is given (`sub_thickness_um`):
+each pass through it keeps exp(-4 pi d Im(n cos theta) / lam) of the
+power, held in the tests to `inc_tmm` with an absorbing incoherent
+layer and to the closed form of a bare absorbing plate.
 
 The merit functions here are *linear in T* (weights plus a
 constant), so the exact adjoint of `fabtwin.adjoint` needs only the
@@ -87,6 +91,16 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
             or np.any(np.imag(np.asarray(n_sub)) < 0):
         raise ValueError("negative Im(n) (gain) is out of scope; "
                          "absorbing media carry n + i k with k >= 0")
+    if s0 is None and np.imag(complex(n_inc)) != 0 \
+            and float(theta0_rad) != 0.0:
+        # (new in 0.12.0) in an absorbing incidence medium n sin(theta)
+        # is complex: the incident wave is not a plain plane wave at a
+        # real angle, and the independent `tmm` package refuses this
+        # case too. 0.11.0 returned numbers for it.
+        raise ValueError(
+            "oblique incidence from an absorbing incidence medium (n_inc "
+            "with k > 0) is out of scope: n_inc sin(theta0) would be "
+            "complex. Use a lossless incidence medium, or normal incidence")
     n = np.conj(n)
     if s0 is None:
         n_inc = np.conj(complex(n_inc))
@@ -192,6 +206,27 @@ def _opaque_columns(delta):
     return msum > _OPAQUE_SUM, msum
 
 
+def _incident_power_factor(eta0):
+    """|eta0|^2 / Re(eta0)^2 where the incidence medium absorbs, else None
+    (new in 0.12.0).
+
+    The transmittance is the transmitted power divided by the power the
+    incident wave carries towards the stack, Re(eta0) |E+|^2:
+
+        T = |t|^2 Re(eta_sub) / Re(eta0),   t = 2 eta0 / (eta0 B + C),
+
+    that is T = 4 |eta0|^2 Re(eta_sub) / (Re(eta0) |eta0 B + C|^2), the
+    definition of the independent `tmm` package. For a lossless
+    incidence medium eta0 is real and this is the familiar
+    4 eta0 Re(eta_sub) / |eta0 B + C|^2. Up to 0.11.0 that real-eta0
+    formula was used for an absorbing incidence medium too, which
+    understates T by the factor Re(eta0)^2 / |eta0|^2."""
+    e0 = np.asarray(eta0)
+    if not (np.iscomplexobj(e0) and np.any(np.imag(e0) != 0)):
+        return None
+    return np.abs(e0) ** 2 / np.real(e0) ** 2
+
+
 def _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol,
                  s0=None):
     delta, eta, eta0, eta_sub = _phases_and_admittances(
@@ -216,6 +251,9 @@ def _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad, pol,
     T = 4.0 * np.real(eta0) * np.real(eta_sub) / np.abs(denom) ** 2
     if np.any(big):
         T = np.where(big, T * np.exp(-2.0 * np.where(big, msum, 0.0)), T)
+    fac = _incident_power_factor(eta0)
+    if fac is not None:
+        T = T * fac
     return R, T
 
 
@@ -272,53 +310,94 @@ def _transmittance_batch(lam_um, t_k, n_k, shape, n_inc=1.0, n_sub=1.0):
     return T
 
 
-def _thick_substrate_media(lam_um, n_inc, n_sub, n_exit, theta0_rad):
+def _thick_substrate_media(lam_um, n_inc, n_sub, n_exit, theta0_rad,
+                           sub_thickness_um=None):
     """Check and prepare the media of a thick-substrate calculation.
 
-    Returns (n_inc float, n_sub (L,), n_exit (L,), s0) with
-    s0 = n_inc sin(theta0), the Snell invariant. Refuses an absorbing
-    incidence medium, substrate or exit medium (the incoherent power
-    sum below is written for lossless ones), and an angle at which no
-    light travels in the substrate (s0 >= n_sub: nothing reaches the
-    back face, so it plays no role; use n_exit=None)."""
+    Returns (n_inc float, n_sub (L,), n_exit (L,), s0, d) with
+    s0 = n_inc sin(theta0), the Snell invariant, and d the substrate
+    thickness (um, None when not given). Refuses an absorbing incidence
+    or exit medium (the incoherent power sum below is written for
+    lossless ones), an absorbing substrate without its thickness (since
+    0.12.0 an absorbing substrate is allowed when `sub_thickness_um` is
+    given: its single-pass loss then enters the power sum), and an
+    angle at which no light travels in the substrate (s0 >= Re n_sub:
+    nothing reaches the back face, so it plays no role; use
+    n_exit=None)."""
     lam = np.asarray(lam_um, dtype=float)
     L = lam.size
+    d = None
+    if sub_thickness_um is not None:
+        try:
+            d = float(sub_thickness_um)
+        except (TypeError, ValueError):
+            raise ValueError("sub_thickness_um must be one positive number "
+                             "(um)") from None
+        if not (np.isfinite(d) and d > 0):
+            raise ValueError("sub_thickness_um must be positive and finite "
+                             "(um: 1000.0 for a 1 mm plate)")
     out = []
     for name, v in (("n_inc", n_inc), ("n_sub", n_sub),
                     ("n_exit", n_exit)):
         a = np.asarray(v)
-        if np.iscomplexobj(a) and np.any(np.imag(a) != 0):
+        lossy = np.iscomplexobj(a) and np.any(np.imag(a) != 0)
+        if lossy and name == "n_sub" and d is not None:
+            if np.any(np.imag(a) < 0):
+                raise ValueError("negative Im(n_sub) (gain) is out of "
+                                 "scope; absorbing media carry n + i k "
+                                 "with k >= 0")
+            a = a.astype(complex)
+        elif lossy:
+            extra = (" (an absorbing substrate needs its thickness: give "
+                     "sub_thickness_um)" if name == "n_sub" else "")
             raise ValueError(
                 f"with n_exit (a thick substrate with a bare back face), "
                 f"{name} must be lossless (real): the back-face "
                 "reflections are summed in power for a non-absorbing "
-                "substrate")
-        a = np.real(a).astype(float)
+                f"substrate{extra}")
+        else:
+            a = np.real(a).astype(float)
         if name == "n_inc":
             if a.ndim != 0:
                 raise ValueError("n_inc must be a scalar with n_exit")
         elif a.ndim == 0:
-            a = np.full(L, float(a))
+            a = np.full(L, a[()])
         elif a.shape != (L,):
             raise ValueError(f"{name} must be a scalar or (L,)")
-        if not np.all(np.isfinite(a)) or np.any(a <= 0):
+        if not np.all(np.isfinite(a)) or np.any(np.real(a) <= 0):
             raise ValueError(f"{name} must be positive and finite")
         out.append(a)
     ni, ns, ne = out
     s0 = float(ni) * np.sin(float(theta0_rad))
-    if np.any(s0 >= ns):
+    if np.any(s0 >= np.real(ns)):
         raise ValueError(
             "no light travels in the substrate at this angle (beyond its "
             "critical angle), so its back face plays no role; use "
             "n_exit=None")
-    return float(ni), ns, ne, s0
+    return float(ni), ns, ne, s0, d
+
+
+def _substrate_pass(lam, ns, s0, d):
+    """Fraction of the power that survives one pass through a thick
+    absorbing substrate (new in 0.12.0), or None for a lossless one.
+
+        tau = exp(-4 pi d Im(q) / lam),   q = n cos(theta) = sqrt(n^2 - s0^2)
+
+    on the decaying branch (Im q > 0 for n + i k), the power of a plane
+    wave after the distance d along the normal. With d = None the
+    substrate must be lossless (checked by _thick_substrate_media)."""
+    if d is None or not (np.iscomplexobj(ns) and np.any(np.imag(ns) != 0)):
+        return None
+    nprime = np.conj(ns)                       # the solver's n - i k
+    q = nprime * _cos_branch(nprime, s0)       # Im q <= 0 here
+    return np.exp(4.0 * np.pi * d * np.imag(q) / lam)
 
 
 def _thick_rt(lam_um, t_um, n_layers, n_inc, n_sub, n_exit, theta0_rad,
-              pol):
+              pol, sub_thickness_um=None):
     lam = np.asarray(lam_um, dtype=float)
-    ni, ns, ne, s0 = _thick_substrate_media(lam, n_inc, n_sub, n_exit,
-                                           theta0_rad)
+    ni, ns, ne, s0, d = _thick_substrate_media(lam, n_inc, n_sub, n_exit,
+                                              theta0_rad, sub_thickness_um)
     t = np.asarray(t_um, dtype=float)
     n = np.asarray(n_layers)
     Rf, Tf = _coherent_rt(lam, t, n, ni, ns, theta0_rad, pol)
@@ -327,8 +406,25 @@ def _thick_rt(lam_um, t_um, n_layers, n_inc, n_sub, n_exit, theta0_rad,
     # the bare back face: substrate -> exit medium
     Rb, Tb = _coherent_rt(lam, np.zeros(0), np.zeros((0, lam.size)), ns,
                           ne, 0.0, pol, s0)
+    tau = _substrate_pass(lam, ns, s0, d)
+    if tau is not None:
+        # one pass through the substrate on the way to the back face and
+        # one on the way back (new in 0.12.0); lossless: skipped, so the
+        # numbers are those of 0.11.0 bit for bit
+        Rb, Tb = Rb * tau * tau, Tb * tau
+        _check_round_trip(Rr * Rb)
     den = 1.0 - Rr * Rb
     return Rf + Tf * Tr * Rb / den, Tf * Tb / den
+
+
+def _check_round_trip(g):
+    """The power left after one round trip in an absorbing substrate is
+    below 1 for any real plate; refuse otherwise rather than divide by
+    a non-positive 1 - g."""
+    if np.any(g >= 1.0):
+        raise ValueError("the power sum of the substrate's multiple "
+                         "reflections does not converge here (round-trip "
+                         "factor >= 1); this case is out of scope")
 
 
 def _check_angle(theta0_rad):
@@ -350,7 +446,7 @@ def _check_angle(theta0_rad):
 
 def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
              theta0_rad: float = 0.0, pol: str = "s",
-             n_exit=None) -> tuple:
+             n_exit=None, sub_thickness_um=None) -> tuple:
     """Reflectance and transmittance (R, T) of the stack. pol is "s",
     "p" or (new in 0.7.0) "u", unpolarized light: the mean of s and p.
 
@@ -370,39 +466,65 @@ def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     with Rf, Tf the coating seen from the incidence side, Rr, Tr the
     coating seen from inside the substrate, and Rb, Tb the back face.
     Unpolarized light is summed per polarization first. The
-    incidence medium, substrate and exit medium must be lossless.
+    incidence and exit media must be lossless.
+
+    sub_thickness_um (new in 0.12.0) : with n_exit, the thickness of the
+    substrate (um; 1000.0 for a 1 mm plate). It is needed, and only
+    used, when the substrate absorbs (n_sub = n + i k with k > 0, for
+    example a tinted or a slightly absorbing glass): each pass through
+    it keeps the fraction tau = exp(-4 pi d Im(n cos theta) / lam) of
+    the power, so Rb and Tb above become Rb tau^2 and Tb tau. Without
+    it an absorbing substrate is refused, as before. For a lossless
+    substrate it changes nothing.
 
     theta0_rad must be finite and at most pi/2 in size (new check in
     0.9.0).
+
+    An absorbing incidence medium (n_inc = n + i k, k > 0) is allowed at
+    normal incidence only (refused at an angle since 0.12.0). T is then
+    the transmitted power divided by the power of the incident wave,
+    Re(eta0) |E+|^2, as in the independent `tmm` package (0.11.0 and
+    earlier used the lossless formula there, which understated T; see
+    the 0.12.0 changelog). With an absorbing incidence medium, R + T is
+    not 1 even for a lossless stack: in an absorbing medium the power
+    flow of the incident and the reflected wave together is not the
+    difference of their separate powers (they interfere).
     """
     _check_angle(theta0_rad)
+    if sub_thickness_um is not None and n_exit is None:
+        raise ValueError("sub_thickness_um is the thickness of a thick "
+                         "substrate with a back face; it needs n_exit")
     if pol == "u":
         Rs, Ts = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                          theta0_rad, "s", n_exit)
+                          theta0_rad, "s", n_exit, sub_thickness_um)
         Rp, Tp = stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                          theta0_rad, "p", n_exit)
+                          theta0_rad, "p", n_exit, sub_thickness_um)
         return 0.5 * (Rs + Rp), 0.5 * (Ts + Tp)
     if n_exit is not None:
         if pol not in ("s", "p"):
             raise ValueError("pol must be 's', 'p' or 'u'")
         return _thick_rt(lam_um, t_um, n_layers, n_inc, n_sub, n_exit,
-                         theta0_rad, pol)
+                         theta0_rad, pol, sub_thickness_um)
     return _coherent_rt(lam_um, t_um, n_layers, n_inc, n_sub, theta0_rad,
                         pol)
 
 
 def transmittance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                  theta0_rad: float = 0.0, pol: str = "s", n_exit=None):
-    """Intensity transmittance T(lam) (n_exit: see `stack_rt`)."""
+                  theta0_rad: float = 0.0, pol: str = "s", n_exit=None,
+                  sub_thickness_um=None):
+    """Intensity transmittance T(lam) (n_exit, sub_thickness_um: see
+    `stack_rt`)."""
     return stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                    theta0_rad, pol, n_exit)[1]
+                    theta0_rad, pol, n_exit, sub_thickness_um)[1]
 
 
 def reflectance(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
-                theta0_rad: float = 0.0, pol: str = "s", n_exit=None):
-    """Intensity reflectance R(lam) (n_exit: see `stack_rt`)."""
+                theta0_rad: float = 0.0, pol: str = "s", n_exit=None,
+                sub_thickness_um=None):
+    """Intensity reflectance R(lam) (n_exit, sub_thickness_um: see
+    `stack_rt`)."""
     return stack_rt(lam_um, t_um, n_layers, n_inc, n_sub,
-                    theta0_rad, pol, n_exit)[0]
+                    theta0_rad, pol, n_exit, sub_thickness_um)[0]
 
 
 # ------------------------- linear merits --------------------------
