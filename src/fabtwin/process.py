@@ -59,6 +59,11 @@ class DepositionProcess:
                              "p_flake a probability")
         if self.d_ref_um <= 0:
             raise ValueError("d_ref_um must be positive")
+        if not self.beta_t > -1.0:
+            # (new in 0.13.0) a rate bias of -1 or below gives zero or
+            # negative thicknesses, which 0.12.0 returned without comment
+            raise ValueError("beta_t must be greater than -1 (a relative "
+                             "thickness bias; -1 would deposit nothing)")
 
     # ------------------------------------------------------------------
     def deterministic_map(self, t_um, n0):

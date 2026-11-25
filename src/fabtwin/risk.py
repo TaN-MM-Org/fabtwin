@@ -278,11 +278,11 @@ def evaluate_under_process(sampler, t_um, n0, lam_um, shape, weights,
         for k in range(K):
             J[k] = tmm.merit(T[k], w, const)
     else:
-        from .merits import model_spectra
-        for k in range(K):
-            R_, T_, A_ = model_spectra(model, lam_um, tt[k], nt[k], S,
-                                       n_inc, n_sub)
-            J[k] = model.merit(R_, T_, A_)[0]
+        # all K draws in one solver call per condition (new in 0.13.0;
+        # equal to the former per-draw loop to rounding)
+        from .merits import _model_merits_batch
+        J = _model_merits_batch(model, lam_um, np.asarray(tt)[:K],
+                                np.asarray(nt)[:K], S, n_inc, n_sub)
     out = tail_statistics(J, alpha)
     out["samples"] = J
     return out

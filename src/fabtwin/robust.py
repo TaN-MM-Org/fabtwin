@@ -67,8 +67,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import adjoint, tmm
-from .merits import model_merit_and_grad
+from . import adjoint
+from .merits import _model_merits_batch
 from .risk import _ceil_count
 from .twins import GaussianTwin
 
@@ -136,22 +136,26 @@ def _fab_clip_bounds(box):
 
 
 def _draws(lam, t, n0, S, w, const, twin, z, box, n_inc, n_sub, model):
-    """Merit J_k and pathwise gradients of every draw of the batch."""
+    """Merit J_k and pathwise gradients of every draw of the batch.
+
+    All K draws go through the solver at once: through the hand adjoint
+    on the linear path (new in 0.10.0) and, with model=, through
+    `merits._model_merits_batch` (new in 0.13.0). Both do the same
+    arithmetic as one call per draw (`adjoint.merit_and_grad`,
+    `merits.model_merit_and_grad`), which the tests keep as the
+    reference: equal to rounding (bit for bit on the development
+    machine, not on every machine, see 0.10.1)."""
     t = np.asarray(t, float)
     n0 = np.asarray(n0, float)
     N = t.size
     x = twin.transform(z)
     K = x.shape[0]
     t_lo, t_hi, n_lo, n_hi = _fab_clip_bounds(box)
+    tk_raw = t[None, :] * (1.0 + x[:, :N])
+    nk_raw = n0[None, :] + x[:, N:]
+    tk = np.clip(tk_raw, t_lo, t_hi)
+    nk = np.clip(nk_raw, n_lo, n_hi)
     if model is None:
-        # all K draws through the adjoint at once (new in 0.10.0): the
-        # same arithmetic as the per-draw loop below, which the tests
-        # keep as the reference (equal to rounding; bit for bit on the
-        # development machine, not on every machine, see 0.10.1)
-        tk_raw = t[None, :] * (1.0 + x[:, :N])
-        nk_raw = n0[None, :] + x[:, N:]
-        tk = np.clip(tk_raw, t_lo, t_hi)
-        nk = np.clip(nk_raw, n_lo, n_hi)
         # chunks of about _BATCH_ELEMENTS layer-wavelength values keep
         # the work arrays small enough for the processor cache
         Lw = np.asarray(lam).size
@@ -164,29 +168,37 @@ def _draws(lam, t, n0, S, w, const, twin, z, box, n_inc, n_sub, model):
                 adjoint._merits_and_grads_batch(
                     lam, tk[a:a + step], nk[a:a + step], S, w, const,
                     n_inc=n_inc, n_sub=n_sub)
-        in_t = (tk_raw > t_lo) & (tk_raw < t_hi)
-        in_n = (nk_raw > n_lo) & (nk_raw < n_hi)
-        return J, gdk * (1.0 + x[:, :N]) * in_t, gnk * in_n
-    J = np.empty(K)
-    gT = np.empty((K, N))
-    gN = np.empty((K, N))
-    for k in range(K):
-        tk_raw = t * (1.0 + x[k, :N])
-        nk_raw = n0 + x[k, N:]
-        tk = np.clip(tk_raw, t_lo, t_hi)
-        nk = np.clip(nk_raw, n_lo, n_hi)
-        if model is None:
-            Jk, gdk, gnk = adjoint.merit_and_grad(
-                lam, tk, nk, S, w, const, n_inc=n_inc, n_sub=n_sub)
-        else:
-            Jk, gdk, gnk = model_merit_and_grad(
-                model, lam, tk, nk, S, n_inc=n_inc, n_sub=n_sub)
-        J[k] = Jk
-        in_t = (tk_raw > t_lo) & (tk_raw < t_hi)
-        in_n = (nk_raw > n_lo) & (nk_raw < n_hi)
-        gT[k] = gdk * (1.0 + x[k, :N]) * in_t
-        gN[k] = gnk * in_n
-    return J, gT, gN
+    else:
+        J, gdk, gnk = _model_merits_batch(model, lam, tk, nk, S, n_inc,
+                                          n_sub, grads=True)
+    in_t = (tk_raw > t_lo) & (tk_raw < t_hi)
+    in_n = (nk_raw > n_lo) & (nk_raw < n_hi)
+    return J, gdk * (1.0 + x[:, :N]) * in_t, gnk * in_n
+
+
+def _check_alpha(alpha):
+    """The tail fraction of a CVaR must lie in (0, 1] (checked by `cvar`
+    since 0.1, and here since 0.13.0). Up to 0.12.0 the gradient
+    functions and `robustify` accepted any alpha: above 1 they averaged
+    all K draws for the value but weighted the gradient by 1 / ceil(alpha
+    K), so with alpha = 1.5 the gradient was 2/3 of the derivative of
+    the value it was returned with; at or below 0 they used the single
+    worst draw."""
+    try:
+        a = float(alpha)
+    except (TypeError, ValueError):
+        a = float("nan")
+    if not (0.0 < a <= 1.0):
+        raise ValueError(f"alpha must lie in (0, 1]; got {alpha!r}")
+
+
+def _check_batch(z):
+    """At least one draw (new in 0.13.0; an empty batch gave a NaN
+    objective and a zero gradient, so `robustify` returned the start
+    design unchanged)."""
+    if np.ndim(z) != 2 or np.shape(z)[0] < 1:
+        raise ValueError("the latent batch z must be a (K, dim) array with "
+                         "K >= 1 draws")
 
 
 def ru_objective_and_grad(lam, t, n0, tau, S, w, const, twin, z, alpha,
@@ -195,8 +207,8 @@ def ru_objective_and_grad(lam, t, n0, tau, S, w, const, twin, z, alpha,
     over the latent batch z, with its gradients with respect to
     (t, n0, tau) -- unbiased estimates of the population gradients for
     fixed (t, n0, tau). Returns (value, g_t, g_n, g_tau, J)."""
-    if not (0.0 < alpha <= 1.0):
-        raise ValueError("alpha must lie in (0, 1]")
+    _check_alpha(alpha)
+    _check_batch(z)
     J, gT, gN = _draws(lam, t, n0, S, w, const, twin, z, box, n_inc,
                        n_sub, model)
     K = J.size
@@ -213,9 +225,14 @@ def cvar_objective_and_grad(lam, t, n0, S, w, const, twin, z, alpha, box,
     """Empirical CVaR_alpha (or mean - beta*std) of the fabricated
     merit over the latent batch z (K, 2N), with its exact gradient
     with respect to (t, n0). Deterministic for fixed z. model= takes a
-    `fabtwin.OpticalModel` (then w, const are ignored)."""
+    `fabtwin.OpticalModel` (then w, const are ignored). For the CVaR,
+    alpha must lie in (0, 1] (checked since 0.13.0), and z needs at
+    least one row."""
     from .design import _check_model
     _check_model(w, model)
+    if not mean_variance:
+        _check_alpha(alpha)
+    _check_batch(z)
     t = np.asarray(t, float)
     J, gT, gN = _draws(lam, t, n0, S, w, const, twin, z, box, n_inc,
                        n_sub, model)
@@ -251,11 +268,18 @@ def robustify(lam, t0, n00, S, w, const, twin, box, alpha=0.05, K=128,
     its unbiased minibatch gradient (module docstring), carrying the
     threshold tau along. twin may be a `GaussianTwin` or a
     `TwinEnsemble`; model= takes a `fabtwin.OpticalModel`.
-    Returns (t_rob, n_rob, history of (step, objective))."""
+    alpha must lie in (0, 1] and K be a whole number >= 1 (checked
+    since 0.13.0). Returns (t_rob, n_rob, history of (step,
+    objective))."""
     if estimator not in ("sort", "ru"):
         raise ValueError("estimator must be 'sort' or 'ru'")
     if estimator == "ru" and mean_variance:
         raise ValueError("estimator='ru' is for CVaR, not mean-variance")
+    if not mean_variance:
+        _check_alpha(alpha)
+    if int(K) != K or int(K) < 1:
+        raise ValueError(f"K must be a whole number >= 1; got {K!r}")
+    K = int(K)
     from .design import _check_model
     _check_model(w, model)
     rng = np.random.default_rng(seed)

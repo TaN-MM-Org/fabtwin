@@ -119,13 +119,13 @@ def _merit_of(lam, t, n0, S, w, const, n_inc, n_sub, model=None):
 
 def _merits_of(lam, t, n0, S, w, const, n_inc, n_sub, model=None):
     """`_merit_of` for R designs t, n0 (R, N) (new in 0.11.0): one
-    solver call for all of them on the linear path (equal to the
-    per-design loop to rounding, see `tmm._transmittance_batch`), the
-    loop with model=."""
+    solver call for all of them (equal to the per-design loop to
+    rounding, see `tmm._transmittance_batch`; with model= since 0.13.0,
+    see `merits._model_merits_batch`)."""
     R = len(t)
     if model is not None:
-        return np.array([_merit_of(lam, t[r], n0[r], S, w, const, n_inc,
-                                   n_sub, model) for r in range(R)])
+        from .merits import _model_merits_batch
+        return _model_merits_batch(model, lam, t, n0, S, n_inc, n_sub)
     T = tmm._transmittance_batch(lam, t, n0, S, n_inc, n_sub)
     wv = np.asarray(w)
     return np.array([float(tmm.merit(T[r], wv, const)) for r in range(R)])

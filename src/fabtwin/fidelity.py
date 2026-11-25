@@ -105,12 +105,10 @@ def induced_merits(x, t_um, n0, lam_um, shape, weights, const,
         for k in range(x.shape[0]):
             J[k] = tmm.merit(T[k], w, const)
         return J
-    from .merits import model_spectra
-    for k in range(x.shape[0]):
-        R_, T_, A_ = model_spectra(model, lam_um, tt[k], nn[k], S,
-                                   n_inc, n_sub)
-        J[k] = model.merit(R_, T_, A_)[0]
-    return J
+    # with model=, all error vectors in one solver call per condition
+    # (new in 0.13.0; equal to the former per-vector loop to rounding)
+    from .merits import _model_merits_batch
+    return _model_merits_batch(model, lam_um, tt, nn, S, n_inc, n_sub)
 
 
 def twin_fidelity_report(x_model, x_heldout, designs, lam_um, shape,

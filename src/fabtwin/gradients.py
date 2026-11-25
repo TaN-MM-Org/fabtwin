@@ -49,8 +49,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .tmm import (_cos_branch, _incident_power_factor, _opaque_columns,
-                  _scaled_cos_sin)
+from .tmm import (_check_lam_t, _cos_branch, _incident_power_factor,
+                  _opaque_columns, _scaled_cos_sin)
 
 __all__ = ["stack_rta_and_grads", "layer_indices"]
 
@@ -276,6 +276,9 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     sub_thickness_um (um); A then includes the power the substrate
     absorbs.
 
+    Wavelengths must be positive and finite, thicknesses finite and >= 0
+    (checked since 0.13.0, as in `fabtwin.tmm.stack_rt`).
+
     Returns a dict with R, T, A (L,) and, each (N, L), the derivatives
     with respect to every layer thickness (dR_dt, dT_dt, dA_dt), the
     real part of every layer index (dR_dn, dT_dn, dA_dn) and its
@@ -292,6 +295,7 @@ def stack_rta_and_grads(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
 def _rta_and_grads(lam, t, n_layers, n_inc, n_sub, theta0_rad, pol,
                    n_exit, sub_thickness_um=None):
     # the body of stack_rta_and_grads; t may also be (N, L) here
+    _check_lam_t(lam, t)
     n = np.asarray(n_layers)
     if n.ndim == 1:
         n = np.repeat(n[:, None], lam.size, axis=1)

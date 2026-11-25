@@ -57,9 +57,14 @@ errors of each layer into the stops of the layers after it (cut-offs
 fixed from the recipe), and `simulate_monitored_runs` simulates such
 runs without linearization; see their docstrings. Since 0.12.0 both
 take one signal offset per stop, for a monitor whose calibration
-drifts during the run. The monitor beam arrives from the incidence medium
-(`n_inc`, the chamber's vacuum, 1.0, by default) on the growing side
-of the coating.
+drifts during the run. Since 0.13.0 both also take errors of the
+deposited layer indices (`index_mean`, `index_cov`; `index_errors` in
+the simulation): the cut-offs stay those of the recipe, so a layer whose
+index is off stops at another thickness; and all three functions take
+`sub_thickness_um`, for a monitor that measures through a plate that
+absorbs. The monitor beam arrives from the incidence medium (`n_inc`,
+the chamber's vacuum, 1.0, by default) on the growing side of the
+coating.
 """
 from __future__ import annotations
 
@@ -126,7 +131,7 @@ class MonitoringPlan:
 
 
 def _signals_and_slopes(lam_mon, taus, below_t, stack_n, n_inc, n_sub,
-                        theta, pol, n_exit, quantity):
+                        theta, pol, n_exit, quantity, sub_d=None):
     """Signal and exact slope of the growing layer at every thickness in
     `taus` at once: the thicknesses sit along the wavelength axis of the
     gradient code (one column per thickness, all at lam_mon)."""
@@ -136,7 +141,7 @@ def _signals_and_slopes(lam_mon, taus, below_t, stack_n, n_inc, n_sub,
     t2[0] = taus
     t2[1:] = below_t[:, None]
     n2 = np.repeat(np.asarray(stack_n).reshape(-1, 1), P, axis=1)
-    g = _rta_and_grads(lam, t2, n2, n_inc, n_sub, theta, pol, n_exit)
+    g = _rta_and_grads(lam, t2, n2, n_inc, n_sub, theta, pol, n_exit, sub_d)
     return g[quantity], g[f"d{quantity}_dt"][0]
 
 
@@ -145,7 +150,8 @@ def monitoring_plan(lam_mon_um: float, recipe_t_um, n_layers, n_inc=1.0,
                     sigma_signal: float | None = None,
                     theta0_rad: float = 0.0, pol: str = "s", n_exit=None,
                     points_per_quarter_wave: int = 32,
-                    max_nonlinearity: float = 0.1) -> MonitoringPlan:
+                    max_nonlinearity: float = 0.1,
+                    sub_thickness_um=None) -> MonitoringPlan:
     """Level-monitoring plan of a recipe at one monitor wavelength.
 
     lam_mon_um : the monitor wavelength (um).
@@ -167,6 +173,9 @@ def monitoring_plan(lam_mon_um: float, recipe_t_um, n_layers, n_inc=1.0,
         thick, non-absorbing substrate with a bare back face, for a
         monitor that measures through the whole plate (as in
         `fabtwin.stack_rt`).
+    sub_thickness_um : with n_exit, the thickness of the substrate (um),
+        which lets the substrate absorb (n_sub = n + i k; new in 0.13.0,
+        as in `fabtwin.stack_rt`).
     points_per_quarter_wave : sampling of each curve (at least 8), used
         to count turning points and to report the curves.
     max_nonlinearity : above this value of |S''| sigma_signal / (2 S'^2)
@@ -224,7 +233,8 @@ def monitoring_plan(lam_mon_um: float, recipe_t_um, n_layers, n_inc=1.0,
         lo = max(t[j] - h, 0.0)
         vals, slopes = _signals_and_slopes(
             lam_mon, np.concatenate([grid, [lo, t[j] + h]]), below_t, n[j:],
-            n_inc, n_sub, theta0_rad, pol, n_exit, quantity)
+            n_inc, n_sub, theta0_rad, pol, n_exit, quantity,
+            sub_thickness_um)
         # S'' at the cut-off by a central difference of the exact slope
         S2 = (slopes[-1] - slopes[-2]) / (t[j] + h - lo)
         vals, slopes = vals[:-2], slopes[:-2]
@@ -309,6 +319,19 @@ class MonitoringErrors:
     nonlinearity : (N,) |S_j''| sqrt(sigma_t^2 + mean_t^2) / (2 |A[j, j]|),
         the size of the second-order term of layer j's own monitoring
         curve over its error, relative to the first-order term.
+
+    New in 0.13.0, when `monitoring_errors` was given index errors of
+    the deposited layers (otherwise None):
+    index_mean, index_covariance : (N,) and (N, N), the index errors as
+        given (at the monitor wavelength).
+    index_sensitivity : (N, N) B[j, k] = d S_j / d n_k at the recipe (the
+        real part of the index), upper triangular like A.
+    index_propagation : (N, N) G B, the thickness error per unit index
+        error: dt = G (e + o) + G B dn.
+    cross_covariance : (N, N) cov(dt_j, dn_k) = (G B Sigma_n)[j, k], in
+        um per unit index.
+    mean_t, covariance, sigma_t, correlation and the relative fields
+    then include the part caused by the index errors.
     """
 
     recipe_t_um: np.ndarray
@@ -328,26 +351,73 @@ class MonitoringErrors:
     rel_covariance: np.ndarray
     sigma_t_independent: np.ndarray
     nonlinearity: np.ndarray
+    index_mean: object = None
+    index_covariance: object = None
+    index_sensitivity: object = None
+    index_propagation: object = None
+    cross_covariance: object = None
 
-    def twin(self):
+    def twin(self, index_shape=1.0):
         """A `GaussianTwin` of this monitored run: relative thickness
-        errors with mean `rel_mean_t` and covariance `rel_covariance`,
-        index errors exactly zero (the monitor model says nothing about
-        them). It describes runs of THIS recipe; a design that moves far
-        from it has other monitoring curves and needs its own."""
+        errors with mean `rel_mean_t` and covariance `rel_covariance`.
+        Without index errors (the default of `monitoring_errors`) the
+        index errors of the twin are exactly zero: the monitor model says
+        nothing about them. With index errors (new in 0.13.0) the twin
+        carries them too, with their correlation to the thickness errors
+        they cause (`cross_covariance`).
+
+        index_shape : the twin's index errors are at the reference
+            wavelength of the design, while the monitoring functions
+            work at the monitor wavelength. For a layer index
+            n0 * S(lam), give S(lam_mon) here (a number, or one value
+            per layer), and the index errors are divided by it. The
+            default 1.0 suits indices without dispersion.
+
+        It describes runs of THIS recipe; a design that moves far from
+        it has other monitoring curves and needs its own."""
         from .twins import GaussianTwin
         N = self.recipe_t_um.size
         tw = GaussianTwin.__new__(GaussianTwin)
         tw.dim = 2 * N
-        tw.mu = np.concatenate([self.rel_mean_t, np.zeros(N)])
-        cov = np.zeros((2 * N, 2 * N))
         C = 0.5 * (self.rel_covariance + self.rel_covariance.T)
-        cov[:N, :N] = C
-        tw.cov = cov
-        L = np.zeros((2 * N, 2 * N))
-        L[:N, :N] = np.linalg.cholesky(C)
-        tw.L = L
         tw.diagonal = False
+        if self.index_mean is None:
+            tw.mu = np.concatenate([self.rel_mean_t, np.zeros(N)])
+            cov = np.zeros((2 * N, 2 * N))
+            cov[:N, :N] = C
+            tw.cov = cov
+            L = np.zeros((2 * N, 2 * N))
+            L[:N, :N] = np.linalg.cholesky(C)
+            tw.L = L
+            return tw
+        s = np.broadcast_to(np.asarray(index_shape, dtype=float), (N,))
+        if not np.all(np.isfinite(s)) or np.any(s <= 0):
+            raise ValueError("index_shape must be positive and finite (a "
+                             "number or one value per layer)")
+        t = self.recipe_t_um
+        cov = np.zeros((2 * N, 2 * N))
+        cov[:N, :N] = C
+        cross = self.cross_covariance / np.outer(t, s)
+        cov[:N, N:] = cross
+        cov[N:, :N] = cross.T
+        cov[N:, N:] = self.index_covariance / np.outer(s, s)
+        tw.mu = np.concatenate([self.rel_mean_t, self.index_mean / s])
+        tw.cov = 0.5 * (cov + cov.T)
+        # a square root L L^T = cov (any square root gives the same
+        # distribution through x = mu + L z). A component of zero
+        # variance (a layer whose index does not vary) has zero
+        # covariance with all others; it is left out of the factor, so
+        # its draws equal its mean exactly
+        keep = np.nonzero(np.diag(tw.cov) > 0)[0]
+        sub = tw.cov[np.ix_(keep, keep)]
+        try:
+            Lk = np.linalg.cholesky(sub)
+        except np.linalg.LinAlgError:
+            w, V = np.linalg.eigh(sub)
+            Lk = V * np.sqrt(np.clip(w, 0.0, None))
+        L = np.zeros((2 * N, 2 * N))
+        L[np.ix_(keep, keep)] = Lk
+        tw.L = L
         return tw
 
 
@@ -397,15 +467,51 @@ def _quarter_wave(lam_mon, nj, n_inc, theta0_rad):
 
 
 def _partial_signal(lam_mon, t_cols, n_part, n_inc, n_sub, theta, pol,
-                    n_exit, quantity):
+                    n_exit, quantity, sub_d=None, index_grads=False):
     """Signal of partial stacks, one per column of t_cols (Np, M) (top
-    layer first), all of indices n_part (Np,), and the exact derivatives
-    with respect to every layer thickness, (Np, M)."""
+    layer first), of indices n_part ((Np,), the same in every column, or
+    (Np, M), one set per column), and the exact derivatives with respect
+    to every layer thickness, (Np, M); with index_grads also those with
+    respect to the real part of every layer index."""
     M = t_cols.shape[1]
     lam = np.full(M, lam_mon)
-    n2 = np.repeat(np.asarray(n_part).reshape(-1, 1), M, axis=1)
-    g = _rta_and_grads(lam, t_cols, n2, n_inc, n_sub, theta, pol, n_exit)
+    n_part = np.asarray(n_part)
+    if n_part.ndim == 2:
+        n2 = n_part
+    else:
+        n2 = np.repeat(n_part.reshape(-1, 1), M, axis=1)
+    g = _rta_and_grads(lam, t_cols, n2, n_inc, n_sub, theta, pol, n_exit,
+                       sub_d)
+    if index_grads:
+        return g[quantity], g[f"d{quantity}_dt"], g[f"d{quantity}_dn"]
     return g[quantity], g[f"d{quantity}_dt"]
+
+
+def _index_errors(index_mean, index_cov, N):
+    """Check the index errors of the deposited layers (new in 0.13.0):
+    (mean (N,), covariance (N, N)), either None when not given."""
+    mu = cov = None
+    if index_mean is not None:
+        mu = np.array(index_mean, dtype=float)
+        if mu.ndim == 0:
+            mu = np.full(N, float(mu))
+        if mu.shape != (N,) or not np.all(np.isfinite(mu)):
+            raise ValueError(f"index_mean must be a finite number or ({N},) "
+                             "array (index errors of the layers, indexed "
+                             "like the recipe)")
+    if index_cov is not None:
+        cov = np.array(index_cov, dtype=float)
+        if cov.shape != (N, N) or not np.all(np.isfinite(cov)):
+            raise ValueError(f"index_cov must be a finite ({N}, {N}) "
+                             "covariance matrix")
+        scale = max(float(np.max(np.abs(cov))), np.finfo(float).tiny)
+        if np.max(np.abs(cov - cov.T)) > 1e-12 * scale:
+            raise ValueError("index_cov must be symmetric")
+        if np.min(np.linalg.eigvalsh(cov)) < -1e-12 * scale:
+            raise ValueError("index_cov must be positive semi-definite (a "
+                             "covariance matrix)")
+        cov = 0.5 * (cov + cov.T)
+    return mu, cov
 
 
 def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
@@ -413,7 +519,9 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
                       quantity: str = "T", theta0_rad: float = 0.0,
                       pol: str = "s", n_exit=None,
                       signal_offset: float = 0.0,
-                      max_nonlinearity: float = 0.1) -> MonitoringErrors:
+                      max_nonlinearity: float = 0.1,
+                      sub_thickness_um=None, index_mean=None,
+                      index_cov=None) -> MonitoringErrors:
     """Thickness errors of a whole level-monitored run, with the errors
     of each layer carried into the layers after it (new in 0.11.0).
 
@@ -452,20 +560,46 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
         at the moment each layer is stopped).
     max_nonlinearity : refusal threshold on `nonlinearity` (as in
         `monitoring_plan`, but with the propagated error of each layer).
+    sub_thickness_um : with n_exit, the substrate thickness (um), for a
+        substrate that absorbs (new in 0.13.0, as in `fabtwin.stack_rt`).
+    index_mean, index_cov : (new in 0.13.0) errors of the indices of
+        the deposited layers, at the monitor wavelength (real part):
+        their mean ((N,), or one number for every layer) and covariance
+        ((N, N)), indexed like the recipe; default None (no index
+        errors). The cut-offs stay those of the recipe, so a layer whose
+        index is off is stopped at another thickness, and so are the
+        layers after it. To first order, with B[j, k] = d S_j / d n_k,
+
+            sum over k >= j of (A[j, k] dt_k + B[j, k] dn_k) = -(e_j + o_j),
+
+        so dt = G (e + o) + G B dn, and for index errors independent of
+        the signal noise
+
+            mean(dt) = G (o + B mean(dn)),
+            cov(dt) = sigma_signal^2 G G^T + G B cov(dn) B^T G^T,
+            cov(dt, dn) = G B cov(dn).
+
+        A layer index that drifts through the stack (one value per
+        layer) is one case: give it as index_mean.
 
     Returns a `MonitoringErrors`; `.twin()` turns it into a
-    `GaussianTwin` for `evaluate_under_process` or `robustify`.
+    `GaussianTwin` for `evaluate_under_process` or `robustify` (with
+    index errors, the twin carries them too).
 
     Refused (ValueError): the input errors `monitoring_plan` refuses, a
     sigma_signal that is not positive, a non-finite offset, a layer whose
     signal does not change at its cut-off (A[j, j] = 0), and a run in
     which some layer ends so close to a turning point that the first
     order cannot be trusted (`nonlinearity` above `max_nonlinearity`;
-    the message names the layers). The model: the cut-offs are fixed
-    from the recipe before the run (not recomputed during it), the
-    noise at different stops is independent, and nothing else
-    (deposition rate, index) changes during the run; a monitor that
-    drifts enters only through the per-stop offsets.
+    the message names the layers), index errors that are not finite or
+    of the wrong shape, and an index covariance that is not symmetric
+    and positive semi-definite. The model: the cut-offs are fixed from
+    the recipe before the run (not recomputed during it), the noise at
+    different stops is independent, each layer has one index throughout
+    its thickness, and a monitor that drifts enters only through the
+    per-stop offsets. The deposition rate does not enter: a level-
+    monitored layer is stopped by its signal, not by time (a shutter
+    that closes late is not modeled).
     `simulate_monitored_runs` simulates the same model without the
     linearization; the tests compare the two.
     """
@@ -480,12 +614,17 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
     if not (mnl > 0):
         raise ValueError("max_nonlinearity must be positive")
     N = t.size
+    mu_n, cov_n = _index_errors(index_mean, index_cov, N)
+    with_index = mu_n is not None or cov_n is not None
     A = np.zeros((N, N))
+    B = np.zeros((N, N))
     S2 = np.empty(N)
     for j in range(N):
-        _, d = _partial_signal(lam_mon, t[j:, None], n[j:], n_inc, n_sub,
-                               theta0_rad, pol, n_exit, quantity)
+        _, d, dn = _partial_signal(lam_mon, t[j:, None], n[j:], n_inc,
+                                   n_sub, theta0_rad, pol, n_exit, quantity,
+                                   sub_thickness_um, index_grads=True)
         A[j, j:] = d[:, 0]
+        B[j, j:] = dn[:, 0]
         # S'' of layer j's own curve: a central difference of the exact
         # slope, as in monitoring_plan
         h = 1e-4 * _quarter_wave(lam_mon, n[j], n_inc, theta0_rad)
@@ -493,7 +632,8 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
         cols = np.repeat(t[j:, None], 2, axis=1)
         cols[0] = (lo, t[j] + h)
         _, d2 = _partial_signal(lam_mon, cols, n[j:], n_inc, n_sub,
-                                theta0_rad, pol, n_exit, quantity)
+                                theta0_rad, pol, n_exit, quantity,
+                                sub_thickness_um)
         S2[j] = (d2[0, 1] - d2[0, 0]) / (t[j] + h - lo)
     diag = np.diag(A)
     if np.any(diag == 0.0):
@@ -504,8 +644,18 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
     # A is upper triangular: G = -A^-1 by back substitution
     from scipy.linalg import solve_triangular
     G = -solve_triangular(A, np.eye(N), lower=False)
-    mean = G @ off_vec
-    cov = sig ** 2 * (G @ G.T)
+    if not with_index:
+        mean = G @ off_vec
+        cov = sig ** 2 * (G @ G.T)
+    else:
+        GB = G @ B
+        if mu_n is None:
+            mu_n = np.zeros(N)
+        if cov_n is None:
+            cov_n = np.zeros((N, N))
+        mean = G @ (off_vec + B @ mu_n)
+        cross = GB @ cov_n
+        cov = sig ** 2 * (G @ G.T) + cross @ GB.T
     cov = 0.5 * (cov + cov.T)
     sd = np.sqrt(np.diag(cov))
     nonlin = np.abs(S2) * np.sqrt(sd ** 2 + mean ** 2) / (2.0 * np.abs(diag))
@@ -525,7 +675,12 @@ def monitoring_errors(lam_mon_um: float, recipe_t_um, n_layers,
         signal_offset=off, sensitivity=A, propagation=G, mean_t=mean,
         covariance=cov, sigma_t=sd, correlation=cov / np.outer(sd, sd),
         rel_mean_t=mean / t, rel_sigma_t=sd / t, rel_covariance=rel_cov,
-        sigma_t_independent=sig / np.abs(diag), nonlinearity=nonlin)
+        sigma_t_independent=sig / np.abs(diag), nonlinearity=nonlin,
+        index_mean=mu_n if with_index else None,
+        index_covariance=cov_n if with_index else None,
+        index_sensitivity=B if with_index else None,
+        index_propagation=GB if with_index else None,
+        cross_covariance=cross if with_index else None)
 
 
 def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
@@ -534,7 +689,9 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
                             n_inc=1.0, n_sub=1.52, quantity: str = "T",
                             theta0_rad: float = 0.0, pol: str = "s",
                             n_exit=None,
-                            signal_offset: float = 0.0) -> np.ndarray:
+                            signal_offset: float = 0.0,
+                            sub_thickness_um=None,
+                            index_errors=None) -> np.ndarray:
     """Simulate level-monitored runs layer by layer, without any
     linearization (new in 0.11.0).
 
@@ -560,6 +717,12 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
         `numpy.random.default_rng(seed)` (seed may also be a Generator);
     noise : or give the noise at every stop directly, (n_runs, N), with
         noise[r, j] the signal error when layer j of run r is stopped.
+    sub_thickness_um : as in `monitoring_errors` (new in 0.13.0).
+    index_errors : (new in 0.13.0) None, or the errors of the deposited
+        layer indices at the monitor wavelength (real part): (N,), the
+        same in every run, or (n_runs, N). Layer j of run r is then
+        deposited with index n_layers[j] + index_errors[r, j], while the
+        cut-offs stay those of the recipe.
 
     Returns (n_runs, N) deposited thicknesses (um), indexed like the
     recipe. A stop that cannot happen on that branch (the noise or the
@@ -594,6 +757,18 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
             np.random.default_rng(seed)
         e = rng.normal(0.0, 1.0, (int(n_runs), N)) * sig
     K = e.shape[0]
+    dn = None
+    if index_errors is not None:
+        dn = np.array(index_errors, dtype=float)
+        if dn.ndim == 1:
+            dn = np.tile(dn, (K, 1)) if dn.shape == (N,) else dn
+        if dn.shape != (K, N) or not np.all(np.isfinite(dn)):
+            raise ValueError(f"index_errors must be a finite ({N},) or "
+                             f"({K}, {N}) array (n_runs by layers, indexed "
+                             "like the recipe)")
+        if np.any(np.real(n)[None, :] + dn <= 0):
+            raise ValueError("index_errors make the real part of a layer "
+                             "index zero or negative")
     out = np.full((K, N), np.nan)
     alive = np.ones(K, dtype=bool)
     eps = np.finfo(float).eps
@@ -607,22 +782,30 @@ def simulate_monitored_runs(lam_mon_um: float, recipe_t_um, n_layers,
         cols[1:] = out[rows][:, j + 1:].T
         return cols
 
+    def indices(j, rows):
+        # the deposited indices of layers j..N-1, one column per run
+        if dn is None:
+            return np.repeat(np.asarray(n[j:]).reshape(-1, 1), rows.size,
+                             axis=1)
+        return n[j:][:, None] + dn[rows][:, j:].T
+
     def val_at(j, tau, rows):
         # the signal from the forward solver alone (stack_rt, one column
         # per run); the gradient module is used only for slope signs
         M = rows.size
-        n2 = np.repeat(np.asarray(n[j:]).reshape(-1, 1), M, axis=1)
-        return stack_rt(np.full(M, lam_mon), columns(j, tau, rows), n2,
-                        n_inc, n_sub, theta0_rad, pol, n_exit)[qi]
+        return stack_rt(np.full(M, lam_mon), columns(j, tau, rows),
+                        indices(j, rows), n_inc, n_sub, theta0_rad, pol,
+                        n_exit, sub_thickness_um)[qi]
 
     def sig_at(j, tau, rows):
-        _, d = _partial_signal(lam_mon, columns(j, tau, rows), n[j:], n_inc,
-                               n_sub, theta0_rad, pol, n_exit, quantity)
+        _, d = _partial_signal(lam_mon, columns(j, tau, rows),
+                               indices(j, rows), n_inc, n_sub, theta0_rad,
+                               pol, n_exit, quantity, sub_thickness_um)
         return val_at(j, tau, rows), d[0]
 
     for j in range(N - 1, -1, -1):
         cut = stack_rt([lam_mon], t[j:], n[j:], n_inc, n_sub, theta0_rad,
-                       pol, n_exit)[qi]
+                       pol, n_exit, sub_thickness_um)[qi]
         rows = np.nonzero(alive)[0]
         if rows.size == 0:
             break

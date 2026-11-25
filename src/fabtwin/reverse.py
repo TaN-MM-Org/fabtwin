@@ -134,6 +134,25 @@ def _bound_check(x, active_mask, names):
 
 CHI2_WARN_PVALUE = 1e-6
 
+# The smallest relative thickness error a fit may return (new in
+# 0.13.0): every thickness stays at least 0.001 of its recipe value. The
+# search box is +/- 2 max_error, and up to 0.12.0 a max_error of 0.5 or
+# more let the fit pass through zero to negative thicknesses, which have
+# no physical meaning but still give a spectrum. For example, layers of
+# 0.124, 0.135 and 0.064 um with indices 1.46, 2.1 and 1.46 on 1.5, made
+# with relative errors (0.289, 0.206, -0.902) and measured without noise
+# at 60 wavelengths from 0.4 to 0.8 um, were "recovered" with
+# max_error=1.0 and seed=1 as (0.289, 0.201, -1.097): a last layer of
+# -0.006 um.
+_MIN_REL_T = -0.999
+
+
+def _inside(x, lower):
+    """A start of the multi-start search, moved inside the lower bound
+    (only a start below that bound, possible when max_error is close to
+    1 or more, is moved)."""
+    return np.maximum(x, lower + 1e-3 * (1.0 + lower))
+
 
 def _check_search(**kw):
     """Search-box half-widths (checked since 0.9.0; before, a zero or
@@ -185,7 +204,8 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     sigma_T : per-point (or scalar) one-sigma noise of T_meas; omitted
     means unit weights and a residual-scaled uncertainty.
     max_error : half-width of the fractional-error search box; starts
-    are drawn inside it and the fit is bounded by 2x it.
+    are drawn inside it and the fit is bounded by 2x it, and below by
+    -0.999 (since 0.13.0: every thickness stays positive).
     n_starts : multi-starts (first start is the recipe itself).
     chi2_rtol, distinct_atol : two solutions are "equally good" when
     their chi2 agree within chi2_rtol, and "distinct" when any layer's
@@ -264,14 +284,15 @@ def errors_from_spectrum(lam_um, T_meas, recipe_t_um, n0, shape,
     resid(np.zeros(N))          # input errors surface here (0.7.0)
     rng = np.random.default_rng(seed)
     bound = 2.0 * float(max_error)
+    lower = max(-bound, _MIN_REL_T)          # thicknesses stay positive
     starts = [np.zeros(N)]
-    starts += [rng.uniform(-max_error, max_error, N)
+    starts += [_inside(rng.uniform(-max_error, max_error, N), lower)
                for _ in range(int(n_starts) - 1)]
     sols = []
     for x_init in starts:
         try:
             r = least_squares(resid, x_init, jac=jac,
-                              bounds=(-bound, bound), method="trf",
+                              bounds=(lower, bound), method="trf",
                               xtol=1e-14, ftol=1e-14, gtol=1e-12)
         except Exception:
             continue
@@ -405,7 +426,9 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
         boolean (N,) mask of layers whose index is fitted.
     max_error, max_index_error : half-widths of the start boxes for
         relative thickness and absolute index errors (the fit is
-        bounded by twice each).
+        bounded by twice each, and the relative thickness errors below
+        by -0.999, so that every thickness stays positive; new in
+        0.13.0).
     cond_max : refusal threshold on the condition number of the
         weighted Jacobian.
     n_boot : if > 0, also a parametric bootstrap: n_boot synthetic
@@ -505,6 +528,7 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
     lo = np.concatenate([np.full(N, -2.0 * max_error),
                          np.full(nf, -2.0 * max_index_error)])
     hi = -lo
+    lo[:N] = np.maximum(lo[:N], _MIN_REL_T)   # thicknesses stay positive
 
     def solve(p_init):
         return least_squares(resid, p_init, jac=jac, bounds=(lo, hi),
@@ -518,7 +542,7 @@ def errors_from_spectra(lam_um, measurements, recipe_t_um, n0, shape,
     starts = [np.zeros(P)]
     for _ in range(int(n_starts) - 1):
         starts.append(np.concatenate([
-            rng.uniform(-max_error, max_error, N),
+            _inside(rng.uniform(-max_error, max_error, N), lo[0]),
             rng.uniform(-max_index_error, max_index_error, nf)]))
     sols = []
     for p_init in starts:

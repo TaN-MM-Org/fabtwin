@@ -243,6 +243,118 @@ def model_spectra(model, lam_um, t_um, n0, shape, n_inc=1.0, n_sub=1.0,
     return (R, T, A, out) if grads else (R, T, A)
 
 
+# Many designs at once (new in 0.13.0). Up to 0.12.0 every scoring loop
+# with model= (evaluate_under_process, induced_merits, random_search, the
+# probes of inverse_design, and every draw of robustify) called
+# model_spectra or model_merit_and_grad once per design. Here the designs
+# sit side by side along the wavelength axis of one solver call (column
+# k * L + l is design k at wavelength l), in chunks of about
+# _BATCH_COLUMNS layer-column values, as `fabtwin.tmm._transmittance_batch`
+# does for the linear merit. Every column goes through the same
+# element-wise arithmetic as a single-design call; only the merit itself
+# is evaluated one design at a time. The tests compare the two to 1e-12 of
+# the largest value.
+_BATCH_COLUMNS = 2 ** 15
+
+
+def _tile_medium(v, k):
+    """A scalar medium index as it is, an (L,) array repeated k times."""
+    a = np.asarray(v)
+    return v if a.ndim == 0 else np.tile(a, k)
+
+
+def _model_merits_batch(model, lam_um, t_k, n_k, shape, n_inc=1.0,
+                        n_sub=1.0, grads=False):
+    """The merit of K designs under an OpticalModel (new in 0.13.0).
+
+    t_k, n_k : (K, N) thicknesses and indices at the reference
+    wavelength; shape : (L,) or (N, L). Returns J (K,) and, with
+    grads=True, also dJ/dt and dJ/dn0, each (K, N): equal, to rounding,
+    to K calls of `model_merit_and_grad` (or of `model_spectra` and the
+    merit)."""
+    from .gradients import _rta_and_grads
+    from .tmm import stack_rt
+    lam = np.asarray(lam_um, dtype=float)
+    t_k = np.asarray(t_k, dtype=float)
+    n_k = np.asarray(n_k, dtype=float)
+    if lam.ndim != 1 or t_k.ndim != 2 or n_k.shape != t_k.shape:
+        raise ValueError("lam_um must be 1-D, and t_k and n_k (K, N) arrays "
+                         "of one shape")
+    K, N = t_k.shape
+    L = lam.size
+    S = np.asarray(shape)
+    if np.iscomplexobj(S):
+        raise ValueError("the dispersion shape must be real; give the "
+                         "absorption through kext")
+    S = S.astype(float)
+    if S.ndim == 1:
+        S = np.broadcast_to(S[None, :], (N, L))
+    if S.shape != (N, L):
+        raise ValueError("shape must be (L,) or (N, L)")
+    # the extinction of the layers, checked as layer_indices checks it
+    if np.iscomplexobj(np.asarray(n_inc)) and np.imag(n_inc) != 0:
+        raise ValueError("the incidence medium must be lossless (real "
+                         "index) for angle-resolved powers")
+    if not (float(np.real(n_inc)) > 0):
+        raise ValueError("n_inc must be positive")
+    n_inc = float(np.real(n_inc))
+    kx = None
+    if model.kext is not None and K:
+        kx = np.imag(layer_indices(n_k[0], S, model.kext))
+    C = len(model.conditions)
+    J = np.empty(K)
+    gt = np.empty((K, N))
+    gn = np.empty((K, N))
+    step = max(1, int(_BATCH_COLUMNS // max(1, N * L)))
+    for a in range(0, K, step):
+        b = min(K, a + step)
+        k = b - a
+        lam_c = np.tile(lam, k)
+        t_c = np.repeat(t_k[a:b].T, L, axis=1)                 # (N, k L)
+        n_lay = n_k[a:b][:, :, None] * S[None, :, :]           # (k, N, L)
+        if kx is not None:
+            n_lay = n_lay + 1j * kx[None, :, :]
+        n_c = n_lay.transpose(1, 0, 2).reshape(N, k * L)
+        ns_c = _tile_medium(n_sub, k)
+        ne_c = None if model.n_exit is None else \
+            _tile_medium(model.n_exit, k)
+        spectra = []
+        for ang, pol in model.conditions:
+            if grads:
+                g = _rta_and_grads(lam_c, t_c, n_c, n_inc, ns_c, ang, pol,
+                                   ne_c, model.sub_thickness_um)
+            else:
+                R_, T_ = stack_rt(lam_c, t_c, n_c, n_inc, ns_c, ang, pol,
+                                  ne_c, model.sub_thickness_um)
+                g = dict(R=R_, T=T_, A=1.0 - R_ - T_)
+            spectra.append(g)
+        R = np.stack([g["R"].reshape(k, L) for g in spectra], axis=1)
+        T = np.stack([g["T"].reshape(k, L) for g in spectra], axis=1)
+        A = np.stack([g["A"].reshape(k, L) for g in spectra], axis=1)
+        if grads:
+            d = {key: [g[key].reshape(N, k, L) for g in spectra]
+                 for key in ("dR_dt", "dT_dt", "dA_dt", "dR_dn", "dT_dn",
+                             "dA_dn")}
+        for i in range(k):
+            Ji, gR, gT, gA = model.merit(R[i], T[i], A[i])
+            J[a + i] = float(Ji)
+            if not grads:
+                continue
+            gR, gT, gA = (np.broadcast_to(gg, (C, L)) for gg in (gR, gT, gA))
+            dt = np.zeros(N)
+            dn = np.zeros(N)
+            for c in range(C):
+                dt += d["dR_dt"][c][:, i] @ gR[c] \
+                    + d["dT_dt"][c][:, i] @ gT[c] \
+                    + d["dA_dt"][c][:, i] @ gA[c]
+                dn += (d["dR_dn"][c][:, i] * S) @ gR[c] \
+                    + (d["dT_dn"][c][:, i] * S) @ gT[c] \
+                    + (d["dA_dn"][c][:, i] * S) @ gA[c]
+            gt[a + i] = dt
+            gn[a + i] = dn
+    return (J, gt, gn) if grads else J
+
+
 def model_merit_and_grad(model, lam_um, t_um, n0, shape, n_inc=1.0,
                          n_sub=1.0):
     """J and its exact gradients (dJ/dt, dJ/dn0) for an OpticalModel."""

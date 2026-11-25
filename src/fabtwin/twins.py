@@ -101,6 +101,15 @@ class GaussianTwin:
 
         so errors correlated with the measured ones (the AR(1) thickness
         noise of a real tool, for one) are predicted, not ignored.
+
+        A measured component that has zero variance in the twin (the
+        index errors of `MonitoringErrors.twin()`, for example) carries no
+        information about the others: its covariance with every other
+        component is zero too. Since 0.13.0 such a component is fixed at
+        its measured value and leaves the rest unchanged (C_oo^-1 is then
+        the pseudo-inverse, the limit of conditioning on a tiny variance);
+        up to 0.12.0 the singular C_oo raised a LinAlgError, so
+        `reoptimize_remaining` could not use the twin of a monitored run.
         """
         obs = np.asarray(observed, dtype=int).ravel()
         val = np.asarray(values, dtype=float).ravel()
@@ -113,7 +122,10 @@ class GaussianTwin:
         C = self.cov
         Coo = C[np.ix_(obs, obs)]
         Cuo = C[np.ix_(un, obs)]
-        K = np.linalg.solve(Coo, Cuo.T).T
+        try:
+            K = np.linalg.solve(Coo, Cuo.T).T
+        except np.linalg.LinAlgError:
+            K = Cuo @ np.linalg.pinv(Coo, hermitian=True)
         mu = self.mu.copy()
         mu[obs] = val
         mu[un] = self.mu[un] + K @ (val - self.mu[obs])

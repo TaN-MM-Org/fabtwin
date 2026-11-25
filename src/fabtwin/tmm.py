@@ -63,6 +63,19 @@ def _cos_branch(n, s0):
     return np.where(flip, -cos, cos)
 
 
+def _check_lam_t(lam, t):
+    """Refuse wavelengths that are not positive and finite, and layer
+    thicknesses that are negative or not finite (new in 0.13.0). Up to
+    0.12.0 they gave numbers: a negative thickness of an absorbing layer
+    makes it amplify the light (0.05 um of 2.0 + 0.3i taken as -0.05 um
+    on 1.5 gave T = 1.21 at 0.5 um), and a negative wavelength did the
+    same; a NaN gave NaN with a RuntimeWarning."""
+    if not np.all(np.isfinite(lam)) or np.any(lam <= 0):
+        raise ValueError("wavelengths must be positive and finite (um)")
+    if not np.all(np.isfinite(t)) or np.any(t < 0):
+        raise ValueError("layer thicknesses must be finite and >= 0 (um)")
+
+
 def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
                             theta0_rad, pol, s0=None):
     # s0 (internal, new in 0.8.0): the Snell invariant n sin(theta),
@@ -71,6 +84,7 @@ def _phases_and_admittances(lam_um, t_um, n_layers, n_inc, n_sub,
     # calculation. The public path (s0=None) is unchanged.
     lam = np.asarray(lam_um, dtype=float)
     t = np.asarray(t_um, dtype=float)
+    _check_lam_t(lam, t)
     n = np.asarray(n_layers)
     if n.ndim == 1:                     # dispersionless layers
         n = np.repeat(n[:, None], lam.size, axis=1)
@@ -478,7 +492,9 @@ def stack_rt(lam_um, t_um, n_layers, n_inc=1.0, n_sub=1.0,
     substrate it changes nothing.
 
     theta0_rad must be finite and at most pi/2 in size (new check in
-    0.9.0).
+    0.9.0). Wavelengths must be positive and finite, and thicknesses
+    finite and >= 0 (new check in 0.13.0; a layer of zero thickness is
+    allowed and changes nothing).
 
     An absorbing incidence medium (n_inc = n + i k, k > 0) is allowed at
     normal incidence only (refused at an angle since 0.12.0). T is then

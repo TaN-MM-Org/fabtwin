@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .tmm import _check_lam_t
+
 __all__ = ["merit_and_grad", "transmittance_and_grads"]
 
 
@@ -48,6 +50,7 @@ def _layer_data(lam_um, t_um, n0, shape, n_sub):
                          "designs; use fabtwin.tmm for absorbing stacks")
     lam = np.asarray(lam_um, dtype=float)
     t = np.asarray(t_um, dtype=float)
+    _check_lam_t(lam, t)
     n0 = np.asarray(n0, dtype=float)
     S = np.asarray(shape, dtype=float)
     if S.ndim == 1:
@@ -138,6 +141,7 @@ def _merits_and_grads_batch(lam_um, t_um, n0, shape, weights, const,
                          "designs; use fabtwin.tmm for absorbing stacks")
     lam = np.asarray(lam_um, dtype=float)
     t = np.asarray(t_um, dtype=float)
+    _check_lam_t(lam, t)
     n0v = np.asarray(n0, dtype=float)
     if t.ndim != 2 or n0v.shape != t.shape:
         raise ValueError("t_um and n0 must be (K, N) arrays of one shape")
