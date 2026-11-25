@@ -9,7 +9,7 @@
 filters that still work after they are made**. A filter of this kind
 is a stack of thin transparent layers (tens of nanometres each) on a
 glass substrate; the thickness and refractive index of each layer
-decide which colours of light pass and which are blocked. A
+decide which colors of light pass and which are blocked. A
 deposition machine never builds exactly the stack you asked for. The
 package learns how *your* machine tends to err from its past runs,
 and then changes the design so that the worst few percent of the
@@ -56,6 +56,8 @@ It answers questions such as:
   as actually deposited, so that the errors of one layer move the
   stops of the next: how large and how correlated are the thickness
   errors, and what do they do to the worst devices?
+- If the deposited layers do not have the recipe index, how does the
+  monitor turn that into thickness errors?
 
 The optics are computed with the standard exact transfer-matrix
 method, and the design gradients with a derivative derived by hand
@@ -232,9 +234,9 @@ Units and conventions:
 ## Examples
 
 Each example below runs as written, and the output shown is what it
-printed with fabtwin 0.12.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
-0.12 on Linux). Examples 1 to 22 print exactly what they printed with
-0.11.0; example 23 is new. Wavelength ranges, stacks, error sizes,
+printed with fabtwin 0.13.0 (Python 3.13, NumPy 2.5, SciPy 1.18, JAX
+0.12 on Linux). Examples 1 to 23 print exactly what they printed with
+0.12.0; examples 24 and 25 are new. Wavelength ranges, stacks, error sizes,
 absorption and noise levels are
 illustrative values chosen for the examples, not recommended designs.
 The built-in materials and `PAPER_PROCESS` carry their own
@@ -517,7 +519,7 @@ runs needed for a standard error of 0.004: 102 (largest predicted standard error
 ```
 
 `design_recipes` spreads recipes over the box: it draws 512 candidate
-recipes, starts from the one nearest their centre, and then
+recipes, starts from the one nearest their center, and then
 repeatedly adds the candidate farthest from all recipes chosen so far
 (a greedy "maximin" rule; Johnson, Moore and Ylvisaker, J. Statist.
 Plann. Inference 26, 131 (1990)). Distances are measured after
@@ -1441,8 +1443,108 @@ plates with the independent `tmm` package and with the closed form of
 a bare absorbing plate. `sub_thickness_um` works the same way in
 `stack_rt`, `reflectance`, `stack_rta_and_grads` (with exact
 derivatives), `errors_from_spectra`, `recovery_precision` and
-`OpticalModel`. `A = 1 - R - T` then includes the light the plate
+`OpticalModel`, and since 0.13.0 in the monitoring functions
+(example 25). `A = 1 - R - T` then includes the light the plate
 absorbs.
+
+### 24. A monitored run whose layer indices are off
+
+```python
+import numpy as np
+import fabtwin as ft
+
+t = np.array([0.075, 0.098, 0.066, 0.118])    # the recipe of example 21
+n = np.array([2.1, 1.46, 2.1, 1.46])           # indices at the monitor wavelength
+# The deposited indices scatter by 0.003 from run to run, correlated
+# between neighboring layers (illustrative values).
+i = np.arange(4)
+cov_n = 0.003 ** 2 * 0.5 ** np.abs(i[:, None] - i[None, :])
+alone = ft.monitoring_errors(0.47, t, n, sigma_signal=0.001, n_sub=1.52)
+e = ft.monitoring_errors(0.47, t, n, sigma_signal=0.001, n_sub=1.52,
+                         index_cov=cov_n)
+print("layer  signal noise only  with index errors  +0.01 in its index (nm)")
+for j in e.order:
+    print(f"{j:5d} {1e3 * alone.sigma_t[j]:18.3f} {1e3 * e.sigma_t[j]:18.3f} "
+          f"{10 * e.index_propagation[j, j]:24.2f}")
+r = e.cross_covariance[3, 3] / (e.sigma_t[3] * np.sqrt(cov_n[3, 3]))
+print(f"correlation of the thickness and index errors of layer 3: {r:.3f}")
+
+# the same runs without the linearization: 4000 simulated runs
+rng = np.random.default_rng(1)
+dn = rng.normal(size=(4000, 4)) @ np.linalg.cholesky(cov_n).T
+runs = ft.simulate_monitored_runs(0.47, t, n, sigma_signal=0.001,
+                                  n_runs=4000, seed=2, n_sub=1.52,
+                                  index_errors=dn)
+print("simulated (nm):", np.round(1e3 * (runs - t).std(axis=0, ddof=1)[e.order], 3))
+print("simulated correlation, layer 3:",
+      round(np.corrcoef(runs[:, 3] - t[3], dn[:, 3])[0, 1], 3))
+twin = e.twin()                       # thickness and index errors together
+print("twin index sigma:", np.round(np.sqrt(np.diag(twin.cov))[4:], 4))
+```
+
+```
+layer  signal noise only  with index errors  +0.01 in its index (nm)
+    3              3.541              3.860                    -5.12
+    2              0.724              0.770                     0.78
+    1              0.603              0.680                    -0.43
+    0              0.234              0.295                    -0.09
+correlation of the thickness and index errors of layer 3: -0.398
+simulated (nm): [3.901 0.778 0.687 0.292]
+simulated correlation, layer 3: -0.385
+twin index sigma: [0.003 0.003 0.003 0.003]
+```
+
+A level monitor stops each layer when the signal reaches the cut-off
+computed from the recipe. If a layer comes out with another index, its
+signal reaches the cut-off at another thickness, and the layers after
+it start from a different stack. `monitoring_errors` (new in 0.13.0:
+`index_mean=`, `index_cov=`) adds these index errors to the signal
+noise, to first order: with `B[j, k]` the change of the signal at the
+stop of layer `j` per unit index of layer `k`, the thickness errors
+are `dt = G (e + o) + G B dn`. Layer 3 changes most, by -5.1 nm for an
+index 0.01 higher, because it ends on a flat part of its monitoring
+curve (example 21), where a small change of the signal moves the stop
+a long way. Its thickness and index errors are then correlated, and
+`.twin()` keeps that correlation, so a design scored or robustified
+with this twin sees both errors together. `simulate_monitored_runs`
+takes the index errors of every run (`index_errors=`) and simulates the
+same runs without the linearization; here its scatter agrees with the
+prediction within 1.1 %. A layer index that drifts down the stack is
+one mean value per layer (`index_mean`). The index errors are those at
+the monitor wavelength; for a dispersive design,
+`.twin(index_shape=S(lam_mon))` converts them to the reference
+wavelength of the design.
+
+### 25. Monitoring through a plate that absorbs
+
+```python
+import numpy as np
+import fabtwin as ft
+
+t = np.array([0.075, 0.098, 0.066, 0.118])    # the recipe of example 21
+n = np.array([2.1, 1.46, 2.1, 1.46])
+# The monitor measures through the whole 1 mm plate, back face included.
+# A clear glass, and one with k = 2e-5 (illustrative, not a measured glass).
+for k in (0.0, 2e-5):
+    p = ft.monitoring_plan(0.47, t, n, n_sub=1.52 + 1j * k, n_exit=1.0,
+                           sub_thickness_um=1000.0, sigma_signal=0.001)
+    print(f"k = {k:g}: cut-offs {np.round(p.cutoff[p.order], 4)}, "
+          f"thickness errors (nm) {np.round(1e3 * p.sigma_t[p.order], 3)}")
+```
+
+```
+k = 0: cut-offs [0.9257 0.7388 0.8796 0.6895], thickness errors (nm) [3.852 0.342 0.27  0.085]
+k = 2e-05: cut-offs [0.5417 0.4299 0.5141 0.4007], thickness errors (nm) [6.401 0.575 0.45  0.143]
+```
+
+Up to 0.12.0 the monitoring functions refused a substrate that
+absorbs. With `sub_thickness_um` (new in 0.13.0 in `monitoring_plan`,
+`monitoring_errors` and `simulate_monitored_runs`) the monitor signal
+includes the loss in the plate: here one pass through 1 mm keeps
+`exp(-4 pi k d / lam)`, 59 % of the light, the signal and its slopes
+are smaller, and the same 0.1 % noise in `T` gives thickness errors
+about 1.7 times larger. The tests compare the cut-offs with the independent
+`tmm` package and the simulated stops with root finding on `stack_rt`.
 
 ## Tutorials
 
@@ -1643,7 +1745,11 @@ example) gives the inputs, units and conventions.
   `evaluate_under_process`, `induced_merits`, `twin_fidelity_report`
   and `reoptimize_remaining` take it as `model=` (with `w, const`
   passed as `None`). `model_spectra` and `model_merit_and_grad` give
-  the spectra and the merit with its gradient.
+  the spectra and the merit with its gradient. Since 0.13.0 the
+  scoring loops with `model=` (`evaluate_under_process`,
+  `induced_merits`, `random_search`, the probes of `inverse_design`
+  and the draws of `robustify`) put all designs into one solver call
+  per condition, with the same numbers as before.
 
 **Fabrication process and twins** (`fabtwin.process`, `fabtwin.twins`)
 
@@ -1669,7 +1775,9 @@ example) gives the inputs, units and conventions.
   lets `robustify` hold the random numbers fixed while it takes
   derivatives); `conditional(observed, values)` (new in 0.7.0) -- the
   twin given some error components already measured, from the exact
-  Gaussian conditional distribution.
+  Gaussian conditional distribution. Since 0.13.0 a measured
+  component of zero variance in the twin (the index errors of a
+  monitoring twin, for example) is accepted and changes nothing else.
 
 **Risk and yield** (`fabtwin.risk`)
 
@@ -1784,6 +1892,14 @@ example) gives the inputs, units and conventions.
   runs simulated layer by layer, without the linearization (example 22
   and the tutorial on a whole monitored run). New in 0.12.0: in both,
   `signal_offset` may be one value per stop, for a drifting monitor.
+- New in 0.13.0: `monitoring_errors(..., index_mean=None,
+  index_cov=None)` and `simulate_monitored_runs(...,
+  index_errors=None)` take errors of the deposited layer indices and
+  carry them into the thickness errors (new fields `index_mean`,
+  `index_covariance`, `index_sensitivity`, `index_propagation`,
+  `cross_covariance`; `twin(index_shape=1.0)` then carries the index
+  errors too; example 24); and `sub_thickness_um=` in all three
+  monitoring functions, for a plate that absorbs (example 25).
 
 **Planning** (`fabtwin.lab`)
 
@@ -1927,11 +2043,25 @@ example) gives the inputs, units and conventions.
   `distribution_distances`) gets a NaN value, which cannot be ranked;
   `transmittance_jax` (and so `merit_jax`, `robustify_gan`) gets a
   complex input; `signal_offset` is neither a number nor one finite
-  value per layer.
+  value per layer;
+- new in 0.13.0: the optics (`stack_rt`, `transmittance`,
+  `reflectance`, `stack_rta_and_grads`, `transmittance_and_grads`,
+  `merit_and_grad`, and everything built on them) get a wavelength
+  that is not positive and finite, or a thickness that is negative or
+  not finite (a thickness of 0 is allowed); `cvar_objective_and_grad`,
+  `ru_objective_and_grad` and `robustify` get an `alpha` outside
+  (0, 1] (not checked with `mean_variance=True`, which does not use
+  it) or no draws (`K` below 1); `DepositionProcess` gets
+  `beta_t <= -1`; `monitoring_errors` gets index errors of the wrong
+  shape or not finite, or an index covariance that is not symmetric
+  and positive semi-definite; `simulate_monitored_runs` gets
+  `index_errors` of the wrong shape, not finite, or making a layer
+  index zero or negative; `MonitoringErrors.twin` gets an
+  `index_shape` that is not positive.
 
 ## How the results are checked
 
-208 automated tests run on every change, on Python 3.10, 3.11, 3.12,
+222 automated tests run on every change, on Python 3.10, 3.11, 3.12,
 3.13 and 3.14 with the `[test,twin]` extras, and once more on Python
 3.10 with the oldest versions `pyproject.toml` allows (NumPy 1.26.0,
 SciPy 1.11.0, JAX 0.4.30, optax 0.2.0; tmm 0.1.8 for the reference
@@ -1986,7 +2116,7 @@ statistical tolerances. The main checks:
 - With the random parts off, the reference process equals its closed
   form exactly.
 - Over 4000 runs, the thickness noise has standard deviation within
-  0.002 of `sig_t` and neighbour correlation within 0.05 of `rho`;
+  0.002 of `sig_t` and neighbor correlation within 0.05 of `rho`;
   over 20000 runs, the mean index is within 2e-3 of the noise-free
   value and the index noise is right-skewed, and the particle-defect
   rate is within 0.006 of `p_flake`.
@@ -2341,6 +2471,56 @@ statistical tolerances. The main checks:
   two runs (relative 1e-12) and the full twin's diagonal; the JAX
   solver refuses complex inputs, also inside `robustify_gan`.
 
+**Index errors in monitored runs, absorbing plates in monitoring,
+faster model scoring and the 0.13.0 fixes**
+
+- Index errors, one layer: a layer deposited with index `n1 + dn` and
+  stopped at the recipe's cut-off stops where the closed form above,
+  solved by hand with index `n1 + dn`, says (1e-13 um; measured 7e-16),
+  and the sensitivity to the index equals the derivative of the closed
+  form, written out by hand (relative 1e-11; measured 8e-16).
+- Index errors, four layers: every simulated run with its own index
+  errors, noise and a drifting offset equals brentq on `stack_rt`,
+  layer by layer (1e-12 um; measured 1.3e-15 um); `G B` equals central
+  finite differences of the simulated runs with respect to each index
+  (relative 1e-6; measured 1.3e-10); a mean index error of size 1e-5
+  moves the simulated layers by `G B mu` (relative 1e-3; measured
+  2e-4); with zero index errors every result is that of 0.12.0, bit for
+  bit. Over 4000 simulated runs with correlated index errors and signal
+  noise the standard deviations agree with the prediction within 6 %
+  (measured 1.6 %), the correlations within 0.08 (measured 0.014), the
+  correlations between thickness and index errors within 0.08
+  (measured 0.023), and the means within 4 standard errors. The twin
+  has exactly the predicted blocks, and a layer whose index does not
+  vary keeps exactly its mean.
+- Monitoring through an absorbing plate (1 mm, `k = 1e-5`): the
+  cut-offs equal the transmittance of each partial stack from
+  `tmm.inc_tmm` (1e-12; measured 8e-16), the slopes central differences
+  of `stack_rt` (relative 1e-7; measured 6.5e-9), the simulated runs
+  brentq on `stack_rt` (1e-12 um; measured 1.4e-15 um), and the
+  propagation matrix central differences of the simulated runs
+  (relative 1e-6; measured 6.5e-9).
+- Scoring with `model=`: on 30 random cases (every kind of merit, up
+  to three conditions, absorbing layers, absorbing plates, small
+  chunks) the batched merits and gradients equal one
+  `model_merit_and_grad` call per design (1e-12 of the largest value;
+  measured 0, the same arithmetic), and `evaluate_under_process`,
+  `induced_merits`, `random_search`, the probes of `inverse_design`
+  and the draws of `cvar_objective_and_grad` and
+  `ru_objective_and_grad` equal the per-design loops of 0.12.0, kept in
+  the tests (measured at most 5e-16).
+- The five fixes (see [Corrections](#corrections-in-earlier-versions))
+  each have a test that fails on 0.12.0: negative thicknesses and
+  wavelengths are refused, while a layer of zero thickness changes
+  nothing (1e-15); the two noise-free spectra that 0.12.0 fitted with a
+  negative thickness or refused now give the true errors (1e-6;
+  measured 1.4e-11); `alpha` outside (0, 1] and empty batches are
+  refused, and at `alpha = 1` the gradient is the central difference
+  of the value (relative 1e-6; measured 8.5e-9); a monitoring twin
+  conditioned on its index errors equals the twin conditioned on the
+  thicknesses alone (1e-12; measured 3e-15), and `reoptimize_remaining`
+  runs with it; and `beta_t <= -1` is refused.
+
 **Learned twin** (`[twin]` extra): the moment penalty is exactly zero
 for identical batches; short training runs finish with finite losses;
 samples stay within `out_scale`; the CVaR gradient through the
@@ -2349,6 +2529,40 @@ generator matches finite differences to a relative 1e-5;
 works, not how good a trained twin is.
 
 ## Corrections in earlier versions
+
+**0.13.0 fixed three wrong answers and two failures.** None of them
+changes a README example or a tutorial.
+
+- *Negative thicknesses and wavelengths.* The optics accepted them.
+  For an absorbing layer a negative thickness (or a negative
+  wavelength) makes the layer amplify the light: 0.05 um of
+  `2.0 + 0.3i` on 1.5, entered as -0.05 um, gave `T = 1.208` at
+  0.5 um. Such inputs, and non-finite ones, are now refused.
+- *Negative thicknesses from the spectrum fits.* The search box of
+  `errors_from_spectrum` and `errors_from_spectra` is +/- 2
+  `max_error`, so with `max_error` of 0.5 or more the fit could pass
+  through zero thickness. For three layers of 0.124, 0.135 and
+  0.064 um (indices 1.46, 2.1, 1.46 on 1.5) made with relative errors
+  (0.289, 0.206, -0.902) and measured without noise, `max_error=1.0`
+  and `seed=1` gave (0.289, 0.201, -1.097), a last layer of -0.006 um;
+  another case was refused as non-unique although only one answer has
+  positive thicknesses. The relative thickness errors are now bounded
+  below by -0.999, and both cases give the true errors.
+- *A tail fraction outside (0, 1] in robust design.*
+  `cvar_objective_and_grad` and `robustify` accepted any `alpha`. With
+  `alpha = 1.5` the value was the mean of all draws but the gradient
+  2/3 of its derivative; with `alpha <= 0` both used the single worst
+  draw. With `K = 0`, `robustify` returned the start design unchanged
+  after NaN objectives. These are now refused.
+- *Conditioning the twin of a monitored run.* `MonitoringErrors.twin()`
+  has index errors of zero variance, and conditioning it on them
+  (as `reoptimize_remaining` does for the deposited layers) raised
+  `LinAlgError`. Such components carry no information about the
+  others; they are now fixed at the measured values and leave the rest
+  unchanged.
+- *A rate bias of -1 or below.* `DepositionProcess(beta_t=-1)`
+  deposited zero thicknesses and `beta_t < -1` negative ones, without
+  comment. Now refused.
 
 **0.12.0 fixed four wrong answers.** None of them changes a README
 example or a tutorial.
@@ -2519,6 +2733,40 @@ use. The full history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limits
 
+What 0.13.0 adds, and its limits:
+
+- **Index errors in a monitored run.** `monitoring_errors` with
+  `index_mean` and `index_cov` is first order in the index errors and
+  in the signal noise, like the rest of it; over 20000 simulated runs
+  of the tests' case (index errors of 0.002, 0.05 % signal noise) its
+  standard deviations were within 1.8 % of the simulation. Each layer
+  has one index through its whole thickness: an index that changes
+  inside a layer (an inhomogeneous layer) is not modeled. The index
+  errors are taken to be independent of the signal noise, and the
+  turning-point check still uses only the curvature of each layer's
+  own curve. The index errors themselves, their size and correlation,
+  must come from you (for example from `errors_from_spectra` with
+  `fit_index` on past runs); the package has no data for them. In this
+  model a drifting deposition rate does not change a level-monitored
+  stop, because the layer is stopped by its signal, not by time; a
+  shutter that closes late (a time delay) is not modeled. `.twin()`
+  converts the index errors to the reference wavelength by dividing
+  them by `index_shape`, which assumes that an index error scales with
+  the dispersion shape, as the package's layer model `n0 S(lam)` does.
+- **Monitoring through an absorbing plate.** The same incoherent plate
+  model as in 0.12.0; the incidence and exit media must be lossless.
+- **Speed.** The scoring loops with `model=` now evaluate all designs
+  at once. On the development machine (a 10-layer notch at 61
+  wavelengths, two conditions in unpolarized light): 500 draws of
+  `evaluate_under_process` 0.79 s -> 0.12 s, `inverse_design` with 300
+  probes and one ascent step 0.45 s -> 0.07 s, 20 steps of `robustify`
+  with `K = 64` 2.2 s -> 0.9 s (timings of one run each, on a shared
+  machine). The merit function itself is still called once per
+  design, and the gradients at oblique incidence cost more than the
+  linear path's.
+- **Spectrum fits.** The fitted thicknesses stay at least 0.001 of the
+  recipe values; a fit that ends there is flagged by `at_bound`.
+
 What 0.12.0 adds, and its limits:
 
 - **Absorbing plates.** `sub_thickness_um` lets a thick substrate
@@ -2527,9 +2775,8 @@ What 0.12.0 adds, and its limits:
   coherence length of the light, with flat, parallel faces and a bare
   back face, as before. The value of `k` must come from your glass;
   the package has no data for absorbing glasses. The incidence and
-  exit media must still be lossless. The monitoring functions do not
-  take `sub_thickness_um` and still refuse an absorbing substrate with
-  `n_exit`. In the tests the substrate's single-pass power runs from
+  exit media must still be lossless. The monitoring functions did not
+  take `sub_thickness_um` (since 0.13.0 they do). In the tests the substrate's single-pass power runs from
   about 1e-4 to 1 (the `tmm` package used for the comparison holds it
   above 1e-30); a much more opaque plate gives `T` close to 0, as it
   should, but is not compared.
@@ -2542,7 +2789,8 @@ What 0.12.0 adds, and its limits:
 - **A drifting monitor.** One signal offset per stop describes a
   monitor whose calibration drifts; you supply the offsets (for example
   from the drift rate and the time each layer is stopped). A drifting
-  deposition rate or index is still not modeled.
+  deposition rate or index was not modeled (since 0.13.0 an index
+  error per layer is; see above).
 
 What 0.11.0 adds, and its limits:
 
@@ -2551,7 +2799,7 @@ What 0.11.0 adds, and its limits:
   run (not recomputed during it), independent noise at every stop,
   and nothing else changing during the run (deposition rate, index,
   monitor drift; since 0.12.0 a drifting monitor can be given as one
-  offset per stop). It refuses a run in which a layer ends too close to
+  offset per stop, and since 0.13.0 an index error per layer). It refuses a run in which a layer ends too close to
   a turning point for the errors it receives; its check uses the
   curvature of that layer's own monitoring curve, not the second
   derivatives with respect to the layers below. In the tutorial its
@@ -2562,14 +2810,15 @@ What 0.11.0 adds, and its limits:
   modeled, and such stops come back as NaN. The twin of
   `MonitoringErrors.twin()` belongs to one recipe and has no index
   errors; combine it with an index model of your own if the indices
-  vary.
+  vary (since 0.13.0: give that model to `monitoring_errors`, and the
+  twin carries it).
 - **Band edges.** A wavelength within `1e-9` of the largest wavelength
   of a band edge counts as on the edge; a grid finer than that is not
   meaningful.
 - **Speed.** The linear-merit scoring loops now evaluate all designs
   in one call (`evaluate_under_process`, `induced_merits`,
   `random_search`, the probes of `inverse_design`); with `model=` they
-  still evaluate one design at a time.
+  still evaluated one design at a time (since 0.13.0 they do not).
 
 What 0.10.0 adds, and its limits:
 
@@ -2588,7 +2837,7 @@ What 0.10.0 adds, and its limits:
   the unscaled `B` and `C`, which can overflow.
 - **Speed.** `robustify` (without `model=`) now evaluates all draws of
   a step at once, with the same numbers as before. With `model=` it
-  still evaluates one draw at a time.
+  still evaluated one draw at a time (since 0.13.0 it does not).
 
 What 0.9.0 adds, and its limits:
 
@@ -2608,7 +2857,7 @@ What 0.8.0 changed about the limits of 0.7.0:
 
 - **Measured plates.** Up to 0.7.0 the substrate was always infinitely
   thick, so a spectrum of a real coated plate (back face included)
-  could not be modelled, and fitting one gave wrong layer errors
+  could not be modeled, and fitting one gave wrong layer errors
   without any sign of trouble. `n_exit` now models the back face, and
   the recovery functions warn when the fit is inconsistent with the
   stated noise or stopped by the search box. What is left: the
@@ -2618,7 +2867,7 @@ What 0.8.0 changed about the limits of 0.7.0:
   `sub_thickness_um`, see above); the back face must be bare (uncoated) and
   flat; the substrate is assumed much thicker than the coherence
   length of the light (the fringes of a thin, coherent substrate are
-  not modelled); and the chi-square warning is only as good as the
+  not modeled); and the chi-square warning is only as good as the
   stated noise level.
 - **How sure a number is.** `yield_interval`, `cvar_interval` and
   `cvar_difference` give the Monte-Carlo uncertainty of a yield or a

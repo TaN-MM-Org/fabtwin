@@ -1,5 +1,154 @@
 # Changelog
 
+## 0.13.0 (2026-11-25)
+
+Index errors of the deposited layers in a monitored run, monitoring
+through a plate that absorbs, faster scoring with `model=`, and five
+fixes: negative thicknesses and wavelengths in the optics, negative
+thicknesses from the spectrum fits, `alpha` and `K` of the robust
+objectives, conditioning a twin on a component of zero variance, and a
+rate bias of -1 in the reference process.
+
+### Added
+
+- `index_mean=` and `index_cov=` in `monitoring_errors`: errors of the
+  indices of the deposited layers at the monitor wavelength (mean,
+  `(N,)` or one number, and covariance, `(N, N)`), independent of the
+  signal noise. The cut-offs stay those of the recipe, so to first
+  order `dt = G (e + o) + G B dn` with `B[j, k] = d S_j / d n_k` (the
+  exact derivatives of `fabtwin.gradients`), and `mean_t`,
+  `covariance` and the fields derived from them include the index
+  part. New fields of `MonitoringErrors` (None without index errors):
+  `index_mean`, `index_covariance`, `index_sensitivity` (`B`),
+  `index_propagation` (`G B`) and `cross_covariance` (`cov(dt, dn)`).
+  `MonitoringErrors.twin(index_shape=1.0)` then carries the index
+  errors and their correlation with the thickness errors; the index
+  errors are divided by `index_shape`, the dispersion shape at the
+  monitor wavelength, to give them at the reference wavelength. Without
+  index errors every result is that of 0.12.0, bit for bit.
+- `index_errors=` in `simulate_monitored_runs`: the index errors of
+  every run (`(n_runs, N)`, or `(N,)` for all runs), simulated without
+  the linearization.
+- `sub_thickness_um=` in `monitoring_plan`, `monitoring_errors` and
+  `simulate_monitored_runs`, for a monitor that measures through a
+  plate that absorbs (as in `stack_rt` since 0.12.0); up to 0.12.0
+  these functions refused an absorbing substrate with `n_exit`.
+- README examples 24 (a monitored run whose layer indices are off) and
+  25 (monitoring through a plate that absorbs).
+
+### Changed
+
+- Speed: with `model=`, `evaluate_under_process`, `induced_merits`
+  (and so `twin_fidelity_report`), `random_search`, the probes of
+  `inverse_design` and the draws of `robustify`,
+  `cvar_objective_and_grad` and `ru_objective_and_grad` put all
+  designs side by side in one solver call per condition
+  (`merits._model_merits_batch`, internal), instead of one call per
+  design. Same element-wise arithmetic; the tests compare with the
+  0.12.0 loops to 1e-12 of the largest value (measured at most
+  5e-16). On the development machine, for a 10-layer notch at 61
+  wavelengths and two unpolarized conditions: 500 draws of
+  `evaluate_under_process` 0.79 s -> 0.12 s, `inverse_design` with
+  300 probes and one ascent step 0.45 s -> 0.07 s, 20 steps of
+  `robustify` with `K = 64` 2.2 s -> 0.9 s. The merit function is
+  still called once per design.
+- `GaussianTwin.conditional`: see Fixed.
+- `fabtwin.robust` (internal): `_draws` no longer keeps the per-draw
+  loop; the tests keep it as the reference.
+- README: examples 24 and 25, the new keywords, refusals, checks,
+  corrections and limits; the notes in the limits of 0.10.0 to 0.12.0
+  that this release closes say so.
+
+### Fixed
+
+- Negative thicknesses and wavelengths in the optics. `stack_rt`,
+  `transmittance`, `reflectance`, `stack_rta_and_grads`,
+  `transmittance_and_grads` and `merit_and_grad` accepted them, and
+  for an absorbing layer they make the layer amplify the light. Before
+  -> after: 0.05 um of `2.0 + 0.3i` on 1.5 at 0.5 um entered as
+  -0.05 um, `T` 1.208 -> ValueError (the same layer at +0.05 um gives
+  `T < 1`); a wavelength of -0.5 um, the same. Non-finite thicknesses
+  and wavelengths (NaN with a RuntimeWarning before) are refused too;
+  a thickness of 0 is allowed. Test:
+  `test_v013.py::test_negative_thicknesses_and_wavelengths_are_refused`.
+- Negative thicknesses from the spectrum fits. The fit of
+  `errors_from_spectrum` and `errors_from_spectra` was bounded by
+  +/- 2 `max_error`, so a `max_error` of 0.5 or more let it pass
+  through zero thickness. Before -> after, three layers of 0.124, 0.135
+  and 0.064 um (indices 1.46, 2.1, 1.46 on 1.5), relative errors
+  (0.289, 0.206, -0.902), 60 noise-free wavelengths from 0.4 to 0.8 um,
+  `max_error=1.0`, `seed=1`: (0.289, 0.201, -1.097), a last layer of
+  -0.006 um -> (0.289, 0.206, -0.902); errors (-0.276, 0.139, -0.987):
+  refused as non-unique -> the true errors; `errors_from_spectra` on
+  the same spectrum, -1.013 -> -0.987. The relative thickness errors
+  are now bounded below by -0.999. With the default `max_error=0.1` the
+  bounds are unchanged. Test:
+  `test_v013.py::test_spectrum_fits_keep_thicknesses_positive`.
+- `alpha` and `K` of the robust objectives. `cvar_objective_and_grad`
+  and `robustify` accepted any `alpha`. Before -> after, four layers,
+  20 draws: `alpha = 1.5` returned the mean of the draws as the value
+  but a gradient 0.1586 where the derivative of that value is 0.2378
+  (2/3 of it) -> ValueError; `alpha = -0.1` used the single worst draw
+  -> ValueError; `robustify(K=0)` returned the start design unchanged
+  after NaN objectives -> ValueError. `ru_objective_and_grad` already
+  refused such `alpha`; it now also refuses an empty batch. With
+  `mean_variance=True` alpha is not used and not checked. Test:
+  `test_v013.py::test_robust_objectives_refuse_alpha_outside_0_1_and_empty_batches`.
+- Conditioning on a component of zero variance.
+  `GaussianTwin.conditional` raised `LinAlgError` when a measured
+  component had zero variance, as the index errors of
+  `MonitoringErrors.twin()` have, so `reoptimize_remaining` could not
+  use the twin of a monitored run. Such a component has zero
+  covariance with every other one and carries no information about
+  them; it is now fixed at its measured value and the others are
+  conditioned on the rest (the pseudo-inverse of `C_oo`, used only when
+  `numpy.linalg.solve` finds `C_oo` singular; other cases are
+  unchanged). Test:
+  `test_v013.py::test_conditioning_on_components_of_zero_variance`.
+- A rate bias of -1 or below. `DepositionProcess(beta_t=-1)` deposited
+  zero thicknesses and `beta_t < -1` negative ones. Now refused. Test:
+  `test_v013.py::test_reference_process_refuses_a_rate_bias_of_minus_one`.
+
+None of the fixes changes a README example or a tutorial.
+
+### Not included
+
+- An index that changes inside a layer (an inhomogeneous layer): the
+  monitoring model gives each layer one index. Modeling it would need
+  a profile of the index through the layer, and the package has no
+  data to check such a profile against.
+- A deposition rate that drifts: in the level-monitoring model a layer
+  is stopped by its signal, not by time, so the rate does not enter.
+  A shutter that closes late (a time delay, which turns the rate into
+  extra thickness) is not modeled, because its size depends on the
+  machine and no value could be checked here.
+- Values of the index errors. The size and correlation of the index
+  errors must come from the user (for example from
+  `errors_from_spectra` with `fit_index` on past runs).
+- Cut-offs recomputed during a run, a turning-point check that uses
+  second derivatives with respect to the layers below, controllers
+  that stop at a turning point, and an absorbing incidence medium in
+  `stack_rta_and_grads`: unchanged from 0.12.0 (see the README limits).
+- The paper's Stage 3 correction policies, neural forward surrogates
+  and the paper's benchmark data: not included, by choice, as before.
+
+### Checks (tests)
+
+222 tests (208 in 0.12.0): new file `test_v013.py` (14). Independent
+references: the closed form of one layer on a substrate, inverted by
+hand for a layer of the wrong index, and its derivative with respect
+to the index, written out by hand; scipy's `brentq` on `stack_rt`,
+layer by layer, for runs with index errors and for runs through an
+absorbing plate; central finite differences of the simulated runs
+with respect to each index error and each signal error; the scatter of
+4000 simulated runs; the incoherent solver `inc_tmm` of the `tmm`
+package for the monitor signal through an absorbing plate; the
+per-design loops of 0.12.0, kept in the tests, for every scoring path
+with `model=`; the Gaussian conditional on the thickness components
+alone. Each of the five fixes has a test that fails on 0.12.0 and
+passes now. The README examples 1 to 23 and the three tutorials print
+the same as with 0.12.0.
+
 ## 0.12.0 (2026-11-10)
 
 A thick substrate that absorbs, one monitor offset per stop (a
@@ -543,7 +692,7 @@ and CVaRs.
   `cvar_difference` (the same for the CVaR difference of two designs,
   paired for common random numbers or unpaired).
 
-### Behaviour changes
+### Behavior changes
 
 No returned number changes. New `RuntimeWarning`s, for calls whose
 results were already unreliable:
